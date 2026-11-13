@@ -117,6 +117,7 @@ import {
 	normalizeConfig,
 	type ToolMode as ToolModeCfg,
 	type ThinkingScope,
+	type ResponseSource,
 } from "./ui-panels-config.ts";
 import {
 	getBaseRoot,
@@ -134,6 +135,7 @@ import {
 	formatDuration,
 	headTailPreview,
 	isCappedToolText,
+	keepsInResponseOnly,
 	lastImageBlock,
 	liveTailLines,
 	outputPreview,
@@ -227,6 +229,10 @@ let showDiff = true;
  * dashed line) or "space" (plain blank line). Session-local; /split-divider,
  * persisted by /split-save. */
 let answerDividerMode: "rule" | "space" = "rule";
+/** What response-only mode draws: "messages" = the response doc this
+ * extension builds; "transcript" = pi's own transcript minus tool calls.
+ * Session-local; /split-response-source, persisted by /split-save. */
+let responseSource: ResponseSource = "messages";
 let toolMode: ToolModeCfg = "compact";
 /** Live-output focus of the tools panel (bottom-frame [▶] /
  * /split-tools-live): the id of the PINNED tool whose raw output stream the
@@ -2042,9 +2048,88 @@ function buildTrimDoc(base: Component): Container {
 		} catch {
 			/* unexpected tree shape — response doc only */
 		}
-		responseDocHost.addChild(responseDoc);
+		responseDocHost.addChild(new ResponseBody(base));
 	}
 	return responseDocHost;
+}
+
+/**
+ * pi's own transcript minus tool calls. It draws the LIVE components of pi's
+ * chat container, so whatever pi and other extensions draw there (markdown
+ * transformers, custom entries, custom messages, notices) renders and takes
+ * mouse input as in the full transcript. The kept children are re-read on
+ * every render and mouse event because pi adds and replaces them.
+ */
+class TranscriptWithoutTools extends Container {
+	private readonly chat: Container;
+
+	constructor(chat: Container) {
+		super();
+		this.chat = chat;
+	}
+
+	private sync(): void {
+		this.children = this.chat.children.filter((child) =>
+			keepsInResponseOnly(child as any),
+		);
+	}
+
+	override render(width: number): string[] {
+		this.sync();
+		return super.render(width);
+	}
+
+	override handleMouse(event: any) {
+		this.sync();
+		return super.handleMouse(event);
+	}
+
+	override invalidate(): void {
+		this.chat.invalidate();
+	}
+}
+
+/**
+ * The body of the trimmed doc: the response doc, or pi's transcript minus tool
+ * calls when responseSource is "transcript". The source is read on every
+ * render, so /split-response-source switches it without rebuilding the doc.
+ * An unexpected base tree shape (no chat container) keeps the response doc.
+ */
+class ResponseBody implements Component {
+	private readonly transcript: TranscriptWithoutTools | null;
+
+	constructor(base: Component) {
+		let chat: unknown;
+		try {
+			const kids = (baseTranscriptOf(base) as any)?.child?.children;
+			if (Array.isArray(kids) && kids.length === 3) chat = kids[2];
+		} catch {
+			/* unexpected tree shape — response doc only */
+		}
+		this.transcript =
+			chat && Array.isArray((chat as any).children)
+				? new TranscriptWithoutTools(chat as Container)
+				: null;
+	}
+
+	private active(): Container {
+		return responseSource === "transcript" && this.transcript
+			? this.transcript
+			: responseDoc;
+	}
+
+	render(width: number): string[] {
+		return this.active().render(width);
+	}
+
+	handleMouse(event: any) {
+		return this.active().handleMouse(event);
+	}
+
+	invalidate(): void {
+		responseDoc.invalidate();
+		this.transcript?.invalidate();
+	}
 }
 
 /** Build the trimmed inner: VStack([responseScroll, dock]) like pi's viewport. */
@@ -2283,6 +2368,7 @@ export default function (pi: ExtensionAPI) {
 		showDiff = cfg.diff;
 		answerDividerMode = cfg.answerDivider;
 		trimResponse = cfg.trimResponse;
+		responseSource = cfg.responseSource;
 		// SV-14: arm the startup composition BEFORE reconstruct — the widget
 		// factory runs synchronously inside it and is the first point where the
 		// fullscreen root is available (before the first paint). The deferred
@@ -2653,6 +2739,7 @@ export default function (pi: ExtensionAPI) {
 					showDiff = cfg.diff;
 					answerDividerMode = cfg.answerDivider;
 					trimResponse = cfg.trimResponse;
+					responseSource = cfg.responseSource;
 				}
 				reconcileLayout(ctx.ui.theme);
 				ctx.ui.notify("Split view on (saved layout) · /split-save saves defaults", "info");
@@ -2837,6 +2924,19 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("split-response-source", {
+		description:
+			"Response-only content: messages (user + assistant text) | transcript (pi's transcript minus tool calls, with other extensions' rendering)",
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") return;
+			const arg = String(args ?? "").trim().toLowerCase();
+			if (arg === "messages" || arg === "transcript") responseSource = arg;
+			else responseSource = responseSource === "messages" ? "transcript" : "messages";
+			if (anyPanelActive()) requestRender();
+			ctx.ui.notify(`Response-only content: ${responseSource}`, "info");
+		},
+	});
+
 	pi.registerCommand("split-trim-response", {
 		description:
 			"Panel C: full transcript ↔ response-only (on|off) — response-only: text-only (native parity), full scrollback, scroll offset preserved on branch switch",
@@ -2902,6 +3002,7 @@ export default function (pi: ExtensionAPI) {
 				...(filesWidth === null ? {} : { filesWidth }),
 				diff: showDiff,
 				answerDivider: answerDividerMode,
+				responseSource,
 			});
 			ctx.ui.notify(
 				saved

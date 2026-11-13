@@ -246,6 +246,30 @@ export function thoughtsSinceLastUser(
 }
 
 /** pi auto-discovers every *.ts in an extensions dir; no-op factory. */
+/** As much of a pi transcript component as `keepsInResponseOnly` reads. */
+export interface TranscriptChild {
+	constructor: { name: string };
+	lastMessage?: { content?: unknown };
+}
+
+/**
+ * Whether response-only mode with responseSource "transcript" draws a child
+ * of pi's transcript: everything but tool calls (the Tool Usage panel owns
+ * those) and assistant messages with no text, which would draw only a
+ * thinking label or nothing.
+ */
+export function keepsInResponseOnly(child: TranscriptChild): boolean {
+	const kind = child?.constructor?.name;
+	if (kind === "ToolExecutionComponent") return false;
+	if (kind !== "AssistantMessageComponent") return true;
+	const content = child.lastMessage?.content;
+	if (!Array.isArray(content)) return true;
+	return content.some(
+		(part: any) =>
+			part?.type === "text" && typeof part.text === "string" && part.text.trim(),
+	);
+}
+
 export default function (_pi: ExtensionAPI) {
 	/* shared helper module, not a real extension */
 }

@@ -2,6 +2,16 @@
 
 Notable changes to `pi-split-view`. Versioning is [SemVer](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `responseSource` config and `/split-response-source [messages|transcript]`. With
+  `transcript`, response-only mode draws pi's own transcript components minus tool calls
+  and text-less assistant messages, instead of the response doc this extension builds. What
+  other extensions draw in the transcript (markdown transformers, custom entries, custom
+  messages) then renders and takes mouse input. The default, `messages`, is unchanged.
+
 ## [1.5.0] — 2026-11-12
 
 ### Added

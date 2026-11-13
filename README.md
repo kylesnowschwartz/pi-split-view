@@ -50,7 +50,11 @@ transcript mode — composed as one clean layout layer over pi's native transcri
 - **Response-only mode** — swaps the transcript for a response-only ScrollView (user +
   assistant text, pi's own components) with a dim dashed rule between successive
   assistant answers (`/split-divider`, config `answerDivider`), reusing pi's editor
-  dock verbatim; native parity for scrollback and scroll-offset semantics.
+  dock verbatim; native parity for scrollback and scroll-offset semantics. With
+  `responseSource: "transcript"` (`/split-response-source`) it draws pi's own transcript
+  minus tool calls instead, so what other extensions draw there (markdown transformers,
+  custom entries, custom messages) renders and takes clicks; that view also keeps pi's
+  notices and thinking labels, and has no rule between answers.
 - **Measurement-safe composition** — one layout layer owns the whole frame; discarded
   intrinsic-measure passes are O(1); panels cache on (version, width) with LRU bounding;
   theme changes recompose; startup composes before the first paint.
@@ -87,6 +91,7 @@ Drag-resizes behave like the matching commands: they last for the current window
 | `/files` | toggle the files panel (dock in fullscreen, overlay in regular mode) |
 | `/split-diff` | toggle the files panel's edit-diff subpanel (keep the file list only) |
 | `/split-trim-response` | full transcript ↔ response-only view |
+| `/split-response-source [messages\|transcript]` | response-only content: `messages` = user + assistant text (default), `transcript` = pi's transcript minus tool calls, with other extensions' rendering |
 | `/split-divider [rule\|space]` | response-only separator between successive answers: `rule` = dim dashed line (default), `space` = blank line |
 | `/split-height <n>` | band height in rows (6–40) |
 | `/split-save` | persist the current layout as startup defaults for new windows |

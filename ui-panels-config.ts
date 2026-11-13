@@ -25,6 +25,7 @@ export type ToolMode = "compact" | "full";
  * message); "session" = accumulate every turn until MAX_LINES pushes the
  * oldest rows out. */
 export type ThinkingScope = "turn" | "session";
+export type ResponseSource = "messages" | "transcript";
 
 export interface UiPanelsConfig {
 	/** Master: is the top band (thinking | tools over chat) active. */
@@ -47,6 +48,11 @@ export interface UiPanelsConfig {
 	toolMode?: ToolMode;
 	/** Panel C shows response-only (own-rendered) instead of pi's full transcript. */
 	trimResponse?: boolean;
+	/** What response-only mode draws: "messages" = user + assistant text built
+	 * by this extension; "transcript" = pi's own transcript components minus
+	 * tool calls, so other extensions' markdown transformers, custom entries
+	 * and custom messages render. Defaults to "messages". */
+	responseSource?: ResponseSource;
 	/** Top band height in rows (6–40, default 20). */
 	bandHeight?: number;
 	/** Tools panel's share of the band width in percent (20–60, default 35). */
@@ -75,6 +81,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 	toolMode: ToolMode;
 	thinkingScope: ThinkingScope;
 	trimResponse: boolean;
+	responseSource: ResponseSource;
 	bandHeight: number;
 	toolsWidthPct: number;
 	filesWidth: number | null;
@@ -121,6 +128,8 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		// falls back to the "session" default, preserving the original behaviour.
 		thinkingScope: root.thinkingScope === "turn" ? "turn" : "session",
 		trimResponse: boolOr(root.trimResponse, false),
+		// Strict read: only the literal "transcript" opts in.
+		responseSource: root.responseSource === "transcript" ? "transcript" : "messages",
 		bandHeight,
 		toolsWidthPct,
 		filesWidth,

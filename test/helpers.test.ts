@@ -9,6 +9,7 @@ import {
 	formatDuration,
 	headTailPreview,
 	isCappedToolText,
+	keepsInResponseOnly,
 	lastImageBlock,
 	liveTailLines,
 	outputPreview,
@@ -240,4 +241,40 @@ test("liveTailLines sanitises escapes, carriage returns and tabs", () => {
 	assert.deepEqual(liveTailLines("10%\r50%\r100%", 5).lines, ["100%"]);
 	// Tabs expand to 8-column stops; other control chars vanish.
 	assert.deepEqual(liveTailLines("a\tb\x07", 5).lines, ["a       b"]);
+});
+
+test("keepsInResponseOnly drops tool calls and text-less assistant messages only", () => {
+	const child = (name: string, lastMessage?: { content?: unknown }) => ({
+		constructor: { name },
+		lastMessage,
+	});
+	assert.equal(keepsInResponseOnly(child("ToolExecutionComponent")), false);
+	assert.equal(keepsInResponseOnly(child("UserMessageComponent")), true);
+	assert.equal(keepsInResponseOnly(child("CustomEntryComponent")), true);
+	assert.equal(keepsInResponseOnly(child("Spacer")), true);
+	const text = { type: "text", text: "Done." };
+	const thinking = { type: "thinking", thinking: "hm" };
+	const call = { type: "toolCall", name: "bash" };
+	assert.equal(
+		keepsInResponseOnly(child("AssistantMessageComponent", { content: [thinking, text] })),
+		true,
+	);
+	assert.equal(
+		keepsInResponseOnly(child("AssistantMessageComponent", { content: [thinking, call] })),
+		false,
+	);
+	assert.equal(
+		keepsInResponseOnly(
+			child("AssistantMessageComponent", { content: [{ type: "text", text: "  " }] }),
+		),
+		false,
+	);
+	// Still streaming, with no message yet: kept, it draws nothing.
+	assert.equal(keepsInResponseOnly(child("AssistantMessageComponent")), true);
+});
+
+test("normalizeConfig reads responseSource strictly", () => {
+	assert.equal(normalizeConfig({}).responseSource, "messages");
+	assert.equal(normalizeConfig({ responseSource: "transcript" }).responseSource, "transcript");
+	assert.equal(normalizeConfig({ responseSource: "other" as any }).responseSource, "messages");
 });
