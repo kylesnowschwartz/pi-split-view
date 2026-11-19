@@ -12,6 +12,12 @@ Notable changes to `pi-split-view`. Versioning is [SemVer](https://semver.org/).
   other extensions draw in the transcript (markdown transformers, custom entries, custom
   messages) then renders and takes mouse input. The default, `messages`, is unchanged.
 
+### Fixed
+
+- Files a `bash` command reads now show as `s` in the Files panel when the command
+  changes directory first (`cd dir && cat file`), names a path under `~`, or names it
+  through a variable set by a `name=value` assignment or a `for name in …` loop.
+
 ## [1.5.0] — 2026-11-12
 
 ### Added

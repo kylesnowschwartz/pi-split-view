@@ -128,6 +128,7 @@ import {
 } from "./layout-manager.ts";
 import {
 	appendStreamTail,
+	bashPathCandidates,
 	bandToolsColsFor as bandToolsColsForPct,
 	capDisplayLine,
 	capToolText,
@@ -976,11 +977,8 @@ function pathsFrom(
 	const out: { abs: string; op: string }[] = [];
 	if (toolName === "bash") {
 		const cmd = typeof input?.command === "string" ? input.command : "";
-		for (const raw of cmd.split(/\s+/)) {
-			const tok = raw.replace(/^[("'`]+/, "").replace(/[)"'`;:,]+$/, "");
-			if (!tok || tok.startsWith("-") || /[|&><`$*?]/.test(tok)) continue;
+		for (const abs of bashPathCandidates(cmd, process.cwd(), homedir())) {
 			try {
-				const abs = path.resolve(tok);
 				if (existsSync(abs) && statSync(abs).isFile()) out.push({ abs, op: "s" });
 			} catch {
 				/* skip */

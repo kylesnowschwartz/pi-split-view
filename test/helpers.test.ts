@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
 	appendStreamTail,
+	bashPathCandidates,
 	bandToolsColsFor,
 	capDisplayLine,
 	capToolText,
@@ -277,4 +278,31 @@ test("normalizeConfig reads responseSource strictly", () => {
 	assert.equal(normalizeConfig({}).responseSource, "messages");
 	assert.equal(normalizeConfig({ responseSource: "transcript" }).responseSource, "transcript");
 	assert.equal(normalizeConfig({ responseSource: "other" as any }).responseSource, "messages");
+});
+
+test("bashPathCandidates resolves words against the cd target and the home directory", () => {
+	const paths = (command: string) => bashPathCandidates(command, "/work", "/home/me");
+	assert.deepEqual(paths("cat src/a.ts"), ["/work/cat", "/work/src/a.ts"]);
+	assert.ok(paths("cd pkg && head -30 CHANGELOG.md").includes("/work/pkg/CHANGELOG.md"));
+	assert.ok(paths("cd ~/notes; cat todo.md").includes("/home/me/notes/todo.md"));
+	assert.ok(paths("cat ~/.config/app.json").includes("/home/me/.config/app.json"));
+	assert.ok(paths("cd /srv && cd logs && tail app.log | rg error").includes("/srv/logs/app.log"));
+	assert.ok(paths("cd && cat x").includes("/home/me/x"));
+	assert.ok(paths("cd - && cat x").includes("/work/x"));
+});
+
+test("bashPathCandidates gives loop and assigned variables their values", () => {
+	const paths = (command: string) => bashPathCandidates(command, "/work", "/home/me");
+	const loop = paths('cd docs && for f in a b; do echo "== $f"; cat $f.md; done');
+	assert.ok(loop.includes("/work/docs/a.md") && loop.includes("/work/docs/b.md"));
+	assert.ok(paths("P=~/src; cd $P && cat ${P}/x.ts main.ts").includes("/home/me/src/x.ts"));
+	assert.ok(paths("P=~/src; cd $P && cat main.ts").includes("/home/me/src/main.ts"));
+	assert.ok(paths('d=lib; cat "$d/index.ts"').includes("/work/lib/index.ts"));
+});
+
+test("bashPathCandidates skips globs, redirects, and unknown variables", () => {
+	const paths = (command: string) => bashPathCandidates(command, "/work", "/home/me");
+	assert.deepEqual(paths("cat $UNKNOWN/a.ts *.md 2>/dev/null"), ["/work/cat"]);
+	assert.deepEqual(paths("p=$(pwd); cat $p/a.ts"), ["/work/cat"]);
+	assert.ok(!paths("cd $UNKNOWN && cat a.ts").includes("/a.ts"));
 });

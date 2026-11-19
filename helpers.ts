@@ -4,6 +4,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import * as path from "node:path";
 
 /** True if c is a UTF-16 high (lead) surrogate. */
 export function isHighSurrogate(c: number): boolean {
@@ -268,6 +269,86 @@ export function keepsInResponseOnly(child: TranscriptChild): boolean {
 		(part: any) =>
 			part?.type === "text" && typeof part.text === "string" && part.text.trim(),
 	);
+}
+
+/** Most values one shell variable can stand for in bashPathCandidates. */
+const MAX_VARIABLE_VALUES = 64;
+
+/** Strip the quotes and punctuation a shell word carries around a path. */
+function bareWord(raw: string): string {
+	return raw.replace(/^[("'`]+/, "").replace(/[)"'`;:,]+$/, "");
+}
+
+/** A leading `~` or `~/` becomes the home directory. */
+function expandHome(word: string, home: string): string {
+	if (word === "~") return home;
+	return word.startsWith("~/") ? path.join(home, word.slice(2)) : word;
+}
+
+/** Every reading of `word` once its `$name` and `${name}` references are
+ * replaced by the known values. Empty when a reference is unknown. */
+function expandVariables(word: string, variables: Map<string, string[]>): string[] {
+	let readings = [word];
+	const reference = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/;
+	for (;;) {
+		const match = reference.exec(readings[0]!);
+		if (!match) return readings;
+		const values = variables.get(match[1] ?? match[2]!);
+		if (!values) return [];
+		readings = readings.flatMap((reading) =>
+			values.map((value) => reading.replace(match[0], () => value)),
+		);
+		if (readings.length > MAX_VARIABLE_VALUES) return [];
+	}
+}
+
+/**
+ * Absolute paths that the words of a bash command may name. The caller keeps
+ * the ones that are files.
+ *
+ * Words resolve against the directory the command is in at that point: `cwd`,
+ * then the target of each `cd`. A leading `~` is the home directory. A
+ * `name=value` assignment and the word list of a `for name in …` loop give
+ * `$name` its values, so `cat $f.md` in a loop names one file per loop word.
+ * Words with globs, redirects, or a variable of unknown value are skipped.
+ */
+export function bashPathCandidates(command: string, cwd: string, home: string): string[] {
+	const out: string[] = [];
+	const variables = new Map<string, string[]>();
+	const literal = (word: string) => !/[|&><`$*?]/.test(word);
+	let dir = cwd;
+	for (const segment of command.split(/&&|\|\||[;|&\n]/)) {
+		const words = segment.split(/\s+/).map(bareWord).filter(Boolean);
+		while (["do", "then", "else", "{", "("].includes(words[0] ?? "")) words.shift();
+		if (words[0] === "cd") {
+			const targets = words[1] ? expandVariables(words[1], variables) : [home];
+			if (targets.length === 1 && literal(targets[0]!) && targets[0] !== "-")
+				dir = path.resolve(dir, expandHome(targets[0]!, home));
+			continue;
+		}
+		if (words[0] === "for" && words[2] === "in") {
+			const values = words.slice(3).flatMap((word) => expandVariables(word, variables));
+			if (values.length > 0 && values.length <= MAX_VARIABLE_VALUES && values.every(literal))
+				variables.set(words[1]!, values);
+			else variables.delete(words[1]!);
+			continue;
+		}
+		for (const word of words) {
+			const assignment = /^([A-Za-z_]\w*)=(.*)$/.exec(word);
+			if (assignment) {
+				const values = expandVariables(bareWord(assignment[2]!), variables);
+				if (values.length > 0 && values.every(literal)) variables.set(assignment[1]!, values);
+				else variables.delete(assignment[1]!);
+				continue;
+			}
+			if (word.startsWith("-")) continue;
+			for (const reading of expandVariables(word, variables)) {
+				if (!literal(reading)) continue;
+				out.push(path.resolve(dir, expandHome(reading, home)));
+			}
+		}
+	}
+	return out;
 }
 
 export default function (_pi: ExtensionAPI) {
