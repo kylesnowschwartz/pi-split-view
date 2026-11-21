@@ -2436,7 +2436,7 @@ function buildBand(
 	// B2: on short terminals hide the band instead of squeezing the main area.
 	const fits = (v: { height: number }) =>
 		v.height - bandHeight - 1 >= MIN_ROWS_BELOW_BAND;
-	const stack = new VStack([
+	const bandEntries: any[] = [
 		{
 			component: band,
 			basis: bandHeight,
@@ -2445,15 +2445,19 @@ function buildBand(
 			minSize: Math.min(6, bandHeight),
 			visible: fits,
 		},
-		{
+	];
+	// Framed main panels (tools, thinking, files) draw their own top border.
+	if (layoutSlots.main === "messages") {
+		bandEntries.push({
 			component: new BandSeparator(theme),
 			basis: 1,
 			grow: 0,
 			shrink: 0,
 			visible: fits,
-		},
-		{ component: inner, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-	]);
+		});
+	}
+	bandEntries.push({ component: inner, basis: 0, grow: 1, shrink: 1, minSize: 1 });
+	const stack = new VStack(bandEntries);
 	geo.bandStack = stack;
 	geo.band = band;
 	return stack;
@@ -2943,7 +2947,7 @@ export default function (pi: ExtensionAPI) {
 		thinkingScope = cfg.thinkingScope;
 		thinkingHudOn = cfg.thinkingHud;
 		toolMode = cfg.toolMode;
-		toolExpandGlobal = toolMode === "full" ? "all" : null;
+		toolExpandGlobal = null;
 		bandHeight = cfg.bandHeight;
 		toolsWidthPct = cfg.toolsWidthPct;
 		filesWidth = cfg.filesWidth;
