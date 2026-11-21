@@ -296,3 +296,22 @@ test("normalizeConfig handles thinkingHudMode (ai|local|off) and legacy thinking
 		"ai",
 	);
 });
+
+test("analyzeThinkingLineLocal stays linear on slash-heavy adversarial input", () => {
+	const input = "a/".repeat(2500) + "!";
+	const t0 = performance.now();
+	const spans = analyzeThinkingLineLocal(input);
+	const elapsedMs = performance.now() - t0;
+	assert.equal(spans.map((s) => s.text).join(""), input);
+	assert.ok(elapsedMs < 100, `expected <100ms on 5k slash-heavy line, got ${elapsedMs.toFixed(1)}ms`);
+});
+
+test("applyAiSpansOverLine falls back cleanly to Tier 1 when AI returns no matching spans", () => {
+	const line = "Wait, calling comp.setExpanded(true) permanently mutates shared state.";
+	const local = analyzeThinkingLineLocal(line);
+	assert.deepEqual(applyAiSpansOverLine(line, []), local);
+	assert.deepEqual(
+		applyAiSpansOverLine(line, [{ phrase: "nonexistent phrase", role: "focus" }]),
+		local,
+	);
+});

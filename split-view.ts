@@ -2014,16 +2014,19 @@ class RichToolsBody implements Component {
 		if (rawOut) {
 			const allLines = rawOut.split(/\r?\n/);
 			const cap = zoomedTools ? allLines.length : MAX_EXPANDED_RICH_LINES;
-			const shown = allLines.slice(0, cap);
-			const hidden = Math.max(0, allLines.length - shown.length);
+			const shown = allLines.slice(-cap);
+			const totalLines = entry.active
+				? allLines.length
+				: Math.max(allLines.length, entry.outputLines ?? allLines.length);
+			const hidden = Math.max(0, totalLines - shown.length);
+			if (hidden > 0) {
+				emitLine(th.fg("dim", `  … +${hidden} earlier lines`));
+			}
 			for (const raw of shown) {
 				const styled = highlightCliOutputLine(capDisplayLine(raw, MAX_LINE_CHARS), th);
 				for (const w of wrapTextWithAnsi(styled, bodyWidth)) {
 					emitLine(`  ${w}`);
 				}
-			}
-			if (hidden > 0) {
-				emitLine(th.fg("dim", `  +${hidden} more`));
 			}
 			emittedAny = true;
 		}
@@ -2039,6 +2042,8 @@ class RichToolsBody implements Component {
 		zoomedTools: boolean,
 		emitLine: (content: string) => void,
 	): boolean {
+		// Never hide error messages on failed read/write calls behind parsed args.
+		if (entry.isError) return false;
 		const th = this.theme;
 		const isLight = isLightTheme(th);
 		const bodyWidth = Math.max(8, innerWidth - 2);
@@ -2086,7 +2091,11 @@ class RichToolsBody implements Component {
 			highlighted ?? code.split(/\r?\n/).map((l) => th.fg("toolOutput", l));
 		const cap = zoomedTools ? lines.length : MAX_EXPANDED_RICH_LINES;
 		const shown = lines.slice(0, cap);
-		const hidden = Math.max(0, lines.length - shown.length);
+		const totalLines =
+			lower === "read"
+				? Math.max(lines.length, entry.outputLines ?? lines.length)
+				: lines.length;
+		const hidden = Math.max(0, totalLines - shown.length);
 
 		if (lower === "read") {
 			const offsetVal = parsed?.offset;

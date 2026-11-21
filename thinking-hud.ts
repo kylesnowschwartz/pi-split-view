@@ -108,8 +108,9 @@ const DOTTED_OR_CALL_RE =
 	/(?<![A-Za-z0-9_./~-])(?:[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+|[A-Za-z_$][A-Za-z0-9_$]*(?=\())/g;
 const SLASH_CMD_RE =
 	/(?<![A-Za-z0-9_./~:-])\/[a-z][a-z0-9-]{1,32}(?![A-Za-z0-9_/-]|\.[A-Za-z0-9])/g;
+// Linear-time path matcher (no nested overlapping quantifiers).
 const PATH_RE =
-	/(?<![A-Za-z0-9_:])(?:~\/|\.\.?\/|(?:[A-Za-z0-9_.-]+\/)+)[A-Za-z0-9_./-]*[A-Za-z0-9_-](?:\.[A-Za-z0-9]{1,10})?(?![A-Za-z0-9_./-])/g;
+	/(?<![A-Za-z0-9_:@/-])(?:~\/|\.\.?\/|\/[A-Za-z0-9_.-]+\/|[A-Za-z0-9_.-]+\/)[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\/?(?![A-Za-z0-9_./-])/g;
 const BARE_FILE_RE =
 	/(?<![A-Za-z0-9_./~-])[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|yml|yaml|toml|sh|css|html|py|go|rs|sql|txt)(?![A-Za-z0-9_.-])/g;
 const TECH_IDENT_RE =
@@ -612,6 +613,7 @@ export function applyAiSpansOverLine(
 
 	// 2. Apply AI spans (exact match, case-insensitive fallback, <=5 words, <=32% density).
 	const lineLower = line.toLowerCase();
+	let matchedAiCount = 0;
 	for (const item of aiSpans) {
 		if (!item || typeof item.phrase !== "string" || !VALID_AI_ROLES.has(item.role)) continue;
 		const phrase = item.phrase.trim();
@@ -624,7 +626,13 @@ export function applyAiSpansOverLine(
 		if (!hit) continue;
 		if (claimRange(mask, ranges, hit.start, hit.end, item.role)) {
 			usedWords.count += w;
+			matchedAiCount++;
 		}
+	}
+
+	// Fall back cleanly to Tier 1 local salience when AI returned no usable matches.
+	if (matchedAiCount === 0) {
+		return analyzeThinkingLineLocal(line);
 	}
 
 	// 3. Merge in non-overlapping local backtick code, balanced identifiers/paths, and pivots.
