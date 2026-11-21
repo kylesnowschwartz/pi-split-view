@@ -25,6 +25,7 @@
 	"files": [
 		"split-view.ts",
 		"helpers.ts",
+		"thinking-hud.ts",
 		"layout-manager.ts",
 		"ui-panels-config.ts",
 		"README.md",

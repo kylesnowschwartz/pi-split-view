@@ -25,6 +25,7 @@ export type ToolMode = "compact" | "full";
  * message); "session" = accumulate every turn until MAX_LINES pushes the
  * oldest rows out. */
 export type ThinkingScope = "turn" | "session";
+export type ThinkingHudMode = "ai" | "local" | "off";
 export type ResponseSource = "messages" | "transcript";
 export type SlotName = "topLeft" | "topRight" | "main" | "dock";
 export type SlotPanel = "thinking" | "tools" | "messages" | "files" | null;
@@ -136,8 +137,12 @@ export interface UiPanelsConfig {
 	 * pre-SV-27 behaviour) when absent. */
 	thinkingScope?: ThinkingScope;
 	/** Inline semantic keyword highlighting in the Thinking panel. Defaults to
-	 * true when absent. */
+	 * true when absent. Kept for backward compatibility with thinkingHudMode. */
 	thinkingHud?: boolean;
+	/** Thinking Semantic HUD mode: "ai" (Tier 1 local + Tier 2 async fast-AI),
+	 * "local" (Tier 1 local salience only), or "off" (plain thinkingText).
+	 * Defaults to "ai" (or "off" when legacy thinkingHud === false). */
+	thinkingHudMode?: ThinkingHudMode;
 	/** Tools panel within the band. Defaults to true when absent. */
 	tools?: boolean;
 	/** Files side panel (fullscreen dock or regular overlay). */
@@ -192,6 +197,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 	toolMode: ToolMode;
 	thinkingScope: ThinkingScope;
 	thinkingHud: boolean;
+	thinkingHudMode: ThinkingHudMode;
 	trimResponse: boolean;
 	responseSource: ResponseSource;
 	bandHeight: number;
@@ -288,6 +294,15 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		};
 	}
 
+	const thinkingHudMode: ThinkingHudMode =
+		root.thinkingHudMode === "ai" ||
+		root.thinkingHudMode === "local" ||
+		root.thinkingHudMode === "off"
+			? root.thinkingHudMode
+			: root.thinkingHud === false
+				? "off"
+				: "ai";
+
 	return {
 		split,
 		thinking,
@@ -299,7 +314,8 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		// SV-27: strict read — only the literal "turn" opts in; anything else
 		// falls back to the "session" default, preserving the original behaviour.
 		thinkingScope: root.thinkingScope === "turn" ? "turn" : "session",
-		thinkingHud: boolOr(root.thinkingHud, true),
+		thinkingHud: thinkingHudMode !== "off",
+		thinkingHudMode,
 		trimResponse: boolOr(root.trimResponse, false),
 		// Strict read: only the literal "transcript" opts in.
 		responseSource: root.responseSource === "transcript" ? "transcript" : "messages",

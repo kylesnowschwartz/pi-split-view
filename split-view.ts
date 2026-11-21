@@ -125,8 +125,16 @@ import {
 	type SlotPanel,
 	type ToolMode as ToolModeCfg,
 	type ThinkingScope,
+	type ThinkingHudMode,
 	type ResponseSource,
 } from "./ui-panels-config.ts";
+import {
+	ThinkingAiRefiner,
+	analyzeThinkingLineLocal,
+	applyAiSpansOverLine,
+	renderThinkingSpans,
+	type ThinkingHudPalette,
+} from "./thinking-hud.ts";
 import {
 	getBaseRoot,
 	initLayoutManager,
@@ -152,11 +160,9 @@ import {
 	liveTailLines,
 	outputPreview,
 	stripLeadingTrailingBlankLines,
-	styleThinkingLine,
 	truncateInline,
 	thoughtsSinceLastUser,
 	type ImageBlock,
-	type ThinkingPalette,
 	type ToolExpandGlobal,
 } from "./helpers.ts";
 import { existsSync, statSync } from "node:fs";
@@ -236,9 +242,37 @@ let thinkingOn = true;
  * turn (default, the pre-SV-27 behaviour). Session-local;
  * /split-thinking-scope, persisted by /split-save. */
 let thinkingScope: ThinkingScope = "session";
-/** Inline semantic keyword highlighting in the Thinking panel. Session-local;
- * /split-thinking-hud, persisted by /split-save. */
-let thinkingHudOn = true;
+/** Two-tier semantic HUD mode for the Thinking panel ("ai" | "local" | "off").
+ * Session-local; /split-thinking-hud, persisted by /split-save. */
+let thinkingHudMode: ThinkingHudMode = "ai";
+/** Latest ExtensionContext for async Tier 2 fast-AI thinking refinement. */
+let lastCtx: ExtensionContext | null = null;
+/** Tier 2 async fast-AI paragraph refiner (bounded LRU + concurrency cap). */
+const aiRefiner = new ThinkingAiRefiner();
+
+function enqueueThinkingAiLine(line: string): void {
+	if (thinkingHudMode !== "ai" || !lastCtx) return;
+	aiRefiner.enqueue(line, lastCtx, () => {
+		thinking.version++;
+		thinkingBody?.invalidate();
+		if (anyPanelActive()) requestRender();
+	});
+}
+
+function enqueueRecentThinkingLines(maxLines = 8): void {
+	if (thinkingHudMode !== "ai" || !lastCtx) return;
+	const recent: string[] = [];
+	for (let bi = thinking.blocks.length - 1; bi >= 0 && recent.length < maxLines; bi--) {
+		const block = thinking.blocks[bi]!;
+		for (let li = block.lines.length - 1; li >= 0 && recent.length < maxLines; li--) {
+			const line = block.lines[li]!;
+			if (line.trim().length >= 45) recent.push(line);
+		}
+	}
+	for (let i = recent.length - 1; i >= 0; i--) {
+		enqueueThinkingAiLine(recent[i]!);
+	}
+}
 let toolsOn = true;
 let filesOn = false;
 /** Files panel edit-diff subpanel (session-local; /split-diff, persisted by
@@ -428,7 +462,12 @@ const thinking = {
 			delta,
 			MAX_TAIL_CHARS,
 		);
-		if (this.current.lines.length !== before) this.trim();
+		if (this.current.lines.length !== before) {
+			for (let i = before; i < this.current.lines.length; i++) {
+				enqueueThinkingAiLine(this.current.lines[i]!);
+			}
+			this.trim();
+		}
 		thinkDirty = true;
 		if (!thinkFlushTimer)
 			thinkFlushTimer = setTimeout(flushThinking, THINK_RAF_MS);
@@ -447,9 +486,15 @@ const thinking = {
 				this.current.tail = "";
 			}
 			this.current.complete = true;
+			const completedLines = this.current.lines;
 			this.blocks.push(this.current);
 			this.current = null;
 			this.trim();
+			// Enqueue the last few completed lines for Tier 2 AI refinement
+			// (cached/in-flight lines are deduplicated by ThinkingAiRefiner).
+			for (let i = Math.max(0, completedLines.length - 6); i < completedLines.length; i++) {
+				enqueueThinkingAiLine(completedLines[i]!);
+			}
 		}
 		this.streaming = false;
 		this.version++;
@@ -2237,29 +2282,32 @@ interface BandDef {
 	windowed?: boolean;
 }
 
-function thinkingPalette(theme: Theme): ThinkingPalette {
+function thinkingHudPalette(theme: Theme): ThinkingHudPalette {
 	return {
 		plain: (t) => theme.fg("thinkingText", t),
 		heading: (t) => theme.bold(theme.fg("accent", t)),
-		code: (t) => theme.fg("mdCode", t),
-		path: (t) => theme.fg("mdLink", t),
-		tool: (t) => theme.bold(theme.fg("toolTitle", t)),
-		error: (t) => theme.bold(theme.fg("error", t)),
-		caution: (t) => theme.fg("warning", t),
-		verify: (t) => theme.fg("success", t),
-		plan: (t) => theme.fg("accent", t),
-		hypothesis: (t) => theme.italic(theme.fg("syntaxType", t)),
+		focus: (t) => theme.fg("mdCode", t),
+		action: (t) => theme.fg("success", t),
+		pivot: (t) => theme.bold(theme.fg("warning", t)),
+		risk: (t) => theme.bold(theme.fg("error", t)),
 	};
 }
 
 function bandDef(theme: Theme, id: "thinking" | "tools"): BandDef {
 	if (id === "thinking") {
-		const palette = thinkingPalette(theme);
+		const palette = thinkingHudPalette(theme);
 		return {
 			title: "Thinking",
 			color: "accent",
 			streaming: () => thinking.streaming,
-			style: (l) => (thinkingHudOn ? styleThinkingLine(l, palette) : theme.fg("thinkingText", l)),
+			style: (l) => {
+				if (thinkingHudMode === "off") return theme.fg("thinkingText", l);
+				if (thinkingHudMode === "ai") {
+					const cached = aiRefiner.getCached(l);
+					if (cached) return renderThinkingSpans(applyAiSpansOverLine(l, cached), palette);
+				}
+				return renderThinkingSpans(analyzeThinkingLineLocal(l), palette);
+			},
 			lines: (w) => thinkingLines(theme, w),
 			version: () => thinking.version,
 			empty: "Thinking idle",
@@ -2843,6 +2891,8 @@ export default function (pi: ExtensionAPI) {
 
 	/** Rebuild all buffers from the current branch (start / reload / tree). */
 	const reconstruct = (ctx: ExtensionContext) => {
+		lastCtx = ctx;
+		aiRefiner.clear();
 		thinking.reset();
 		toolsBy.clear();
 		toolOrder.length = 0;
@@ -2918,6 +2968,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			thinking.trim();
 			thinking.version++;
+			enqueueRecentThinkingLines(8);
 		}
 		ensureWidget(ctx);
 		if (anyPanelActive()) requestRender();
@@ -2945,7 +2996,7 @@ export default function (pi: ExtensionAPI) {
 		layoutSlots = { ...cfg.slots };
 		syncFlagsFromSlots();
 		thinkingScope = cfg.thinkingScope;
-		thinkingHudOn = cfg.thinkingHud;
+		thinkingHudMode = cfg.thinkingHudMode;
 		toolMode = cfg.toolMode;
 		toolExpandGlobal = null;
 		bandHeight = cfg.bandHeight;
@@ -2994,7 +3045,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_tree", (_e, ctx) => reconstruct(ctx));
 
 	// Thinking stream.
-	pi.on("message_update", (event) => {
+	pi.on("message_update", (event, ctx) => {
+		lastCtx = ctx;
 		const d = (event as any).assistantMessageEvent;
 		if (d) {
 			if (d.type === "thinking_start") thinking.start();
@@ -3180,6 +3232,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (_e, ctx) => {
+		aiRefiner.clear();
+		lastCtx = null;
 		stopToolTicker();
 		drag = null;
 		if (startupTimer) {
@@ -3427,17 +3481,22 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("split-thinking-hud", {
-		description: "Toggle inline semantic keyword highlighting in the Thinking panel [on|off]",
+		description: "Cycle or set Thinking Semantic HUD mode [ai|local|off|on]",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") return;
+			lastCtx = ctx;
 			const arg = String(args ?? "").trim().toLowerCase();
-			if (arg === "on") thinkingHudOn = true;
-			else if (arg === "off") thinkingHudOn = false;
-			else thinkingHudOn = !thinkingHudOn;
+			if (arg === "ai" || arg === "on") thinkingHudMode = "ai";
+			else if (arg === "local") thinkingHudMode = "local";
+			else if (arg === "off") thinkingHudMode = "off";
+			else if (thinkingHudMode === "ai") thinkingHudMode = "local";
+			else if (thinkingHudMode === "local") thinkingHudMode = "off";
+			else thinkingHudMode = "ai";
+			if (thinkingHudMode === "ai") enqueueRecentThinkingLines(8);
 			thinking.version++;
 			thinkingBody?.invalidate();
 			if (anyPanelActive()) requestRender();
-			ctx.ui.notify(`Thinking HUD: ${thinkingHudOn ? "on" : "off"}`, "info");
+			ctx.ui.notify(`Thinking HUD: ${thinkingHudMode}`, "info");
 		},
 	});
 
@@ -3842,7 +3901,8 @@ export default function (pi: ExtensionAPI) {
 				toolMode,
 				trimResponse,
 				thinkingScope,
-				thinkingHud: thinkingHudOn,
+				thinkingHud: thinkingHudMode !== "off",
+				thinkingHudMode,
 				bandHeight,
 				toolsWidthPct,
 				...(filesWidth === null ? {} : { filesWidth }),
