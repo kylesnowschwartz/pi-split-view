@@ -4,6 +4,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
 import * as path from "node:path";
 
 /** True if c is a UTF-16 high (lead) surrogate. */
@@ -373,6 +374,108 @@ export function filesPanelRowBudget(
 	const listRows = Math.max(2, half - 4);
 	const diffRows = Math.max(0, height - listRows - 6);
 	return { showDiffSection: true, listRows, diffRows };
+}
+
+function shortenHomePath(p: string): string {
+	const home = homedir();
+	if (!home) return p;
+	if (p === home) return "~";
+	const prefix = home.endsWith(path.sep) ? home : home + path.sep;
+	if (p.startsWith(prefix)) return "~/" + p.slice(prefix.length);
+	return p;
+}
+
+/**
+ * Concise single-line summary of a tool call's arguments for tool headers.
+ * Parses JSON when possible and extracts tool-specific key fields (`path`,
+ * `command`, `pattern`, `description`/`tasks`, or primitive `key=val` pairs),
+ * falling back to `truncateInline(rawArgs, maxChars)` on non-JSON.
+ */
+export function formatToolArgSummary(
+	toolName: string,
+	rawArgs: string,
+	maxChars = 60,
+): string {
+	if (!rawArgs || !rawArgs.trim()) return "";
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(rawArgs);
+	} catch {
+		return truncateInline(rawArgs, maxChars);
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return truncateInline(rawArgs, maxChars);
+	}
+	const obj = parsed as Record<string, unknown>;
+	const lower = toolName.toLowerCase();
+
+	if (lower === "read" || lower === "write" || lower === "edit") {
+		const p = typeof obj.path === "string" ? obj.path.trim() : "";
+		if (p) {
+			let summary = shortenHomePath(p);
+			if (lower === "read") {
+				const hasOffset = typeof obj.offset === "number" && Number.isFinite(obj.offset);
+				const hasLimit = typeof obj.limit === "number" && Number.isFinite(obj.limit);
+				if (hasOffset && hasLimit) {
+					const offset = obj.offset as number;
+					const limit = obj.limit as number;
+					summary += limit > 0 ? `:${offset}-${offset + limit - 1}` : `:${offset} (limit ${limit})`;
+				} else if (hasOffset) {
+					summary += `:${obj.offset}`;
+				} else if (hasLimit) {
+					summary += ` (limit ${obj.limit})`;
+				}
+			}
+			return truncateInline(summary, maxChars);
+		}
+	} else if (lower === "bash") {
+		const cmd = typeof obj.command === "string" ? obj.command.trim() : "";
+		if (cmd) return truncateInline(cmd, maxChars);
+	} else if (lower === "grep" || lower === "find" || lower === "ls") {
+		const pattern = typeof obj.pattern === "string" ? obj.pattern.trim() : "";
+		const p = typeof obj.path === "string" ? obj.path.trim() : "";
+		if (pattern && p) return truncateInline(`${pattern} ${shortenHomePath(p)}`, maxChars);
+		if (pattern) return truncateInline(pattern, maxChars);
+		if (p) return truncateInline(shortenHomePath(p), maxChars);
+	} else if (lower === "agent") {
+		const desc = typeof obj.description === "string" ? obj.description.trim() : "";
+		if (desc) return truncateInline(desc, maxChars);
+		if (Array.isArray(obj.tasks)) {
+			const n = obj.tasks.length;
+			return truncateInline(`${n} ${n === 1 ? "task" : "tasks"}`, maxChars);
+		}
+	}
+
+	const keys = Object.keys(obj);
+	if (keys.length === 0) return "";
+	const parts: string[] = [];
+	for (const k of keys) {
+		const v = obj[k];
+		if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+			const s = typeof v === "string" ? truncateInline(v, 24) : String(v);
+			parts.push(`${k}=${s}`);
+			if (parts.length >= 4) break;
+		}
+	}
+	if (parts.length > 0) return truncateInline(parts.join(" "), maxChars);
+	return truncateInline(rawArgs, maxChars);
+}
+
+const ANSI_CSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const ANSI_OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+function isBlankAnsiLine(line: string): boolean {
+	if (line.includes("\x1b_G") || line.includes("\x1b]1337;File=")) return false;
+	return line.replace(ANSI_CSI_RE, "").replace(ANSI_OSC_RE, "").trim() === "";
+}
+
+/** Trim blank or ANSI-only-whitespace lines from the start and end of `lines`. */
+export function stripLeadingTrailingBlankLines(lines: string[]): string[] {
+	let start = 0;
+	while (start < lines.length && isBlankAnsiLine(lines[start]!)) start++;
+	let end = lines.length - 1;
+	while (end >= start && isBlankAnsiLine(lines[end]!)) end--;
+	return start > end ? [] : lines.slice(start, end + 1);
 }
 
 export default function (_pi: ExtensionAPI) {

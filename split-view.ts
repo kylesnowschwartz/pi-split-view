@@ -85,6 +85,8 @@
 
 import {
 	generateDiffString,
+	getLanguageFromPath,
+	highlightCode,
 	renderDiff,
 	AssistantMessageComponent,
 	UserMessageComponent,
@@ -141,12 +143,14 @@ import {
 	dockColsFor as dockColsForManual,
 	filesPanelRowBudget,
 	formatDuration,
+	formatToolArgSummary,
 	headTailPreview,
 	isCappedToolText,
 	keepsInResponseOnly,
 	lastImageBlock,
 	liveTailLines,
 	outputPreview,
+	stripLeadingTrailingBlankLines,
 	truncateInline,
 	thoughtsSinceLastUser,
 	type ImageBlock,
@@ -1662,6 +1666,357 @@ class RecentBody implements Component {
 	dispose(): void {}
 }
 
+/** True if a line contains a Kitty or iTerm2 inline-image escape sequence. */
+function isRawImageLine(line: string): boolean {
+	return line.includes("\x1b_G") || line.includes("\x1b]1337;File=");
+}
+
+/**
+ * Locate live `ToolExecutionComponent` instances in pi's chat container,
+ * keyed by `toolCallId`. Returns an empty map if the base root or chat
+ * container is unavailable or has an unexpected shape.
+ */
+function findLiveToolComponents(): Map<string, any> {
+	const map = new Map<string, any>();
+	const base = getBaseRoot();
+	if (!base) return map;
+	try {
+		const kids = (baseTranscriptOf(base) as any)?.child?.children;
+		const chat = Array.isArray(kids) && kids.length === 3 ? kids[2] : null;
+		const chatChildren = chat?.children;
+		if (!Array.isArray(chatChildren)) return map;
+		for (const child of chatChildren) {
+			if (
+				child?.constructor?.name === "ToolExecutionComponent" &&
+				typeof child.toolCallId === "string"
+			) {
+				map.set(child.toolCallId, child);
+			}
+		}
+	} catch {
+		/* unexpected base tree shape */
+	}
+	return map;
+}
+
+const MAX_FALLBACK_ARG_LINES = 12;
+
+/**
+ * Rich tool-usage panel body: renders each tool call as a compact header row
+ * with an expand/collapse caret, and when expanded reuses pi's own live
+ * `ToolExecutionComponent` (syntax-highlighted code, colored diffs, custom
+ * tool renderers, inline images) or falls back to highlighted JSON args,
+ * diffs, and syntax-highlighted output for subagent / resumed entries.
+ */
+class RichToolsBody implements Component {
+	private cacheVersion = -1;
+	private cacheMinRows = -1;
+	private cacheZoomed = false;
+	private cacheLiveId: string | null = null;
+	private cacheByWidth = new Map<number, string[]>();
+	private static readonly MAX_CACHED_WIDTHS = 4;
+	private imageCache = new Map<string, Image>();
+	private static readonly MAX_CACHED_IMAGES = 8;
+
+	constructor(
+		private theme: Theme,
+		private version: () => number,
+		private empty: string,
+		private minRows: () => number,
+		private ctl?: PanelCtl,
+	) {}
+
+	render(width: number): string[] {
+		const th = this.theme;
+		const v = this.version();
+		const min = Math.max(1, this.minRows());
+		const zoomedTools = zoomed === "tools";
+		if (
+			v !== this.cacheVersion ||
+			min !== this.cacheMinRows ||
+			zoomedTools !== this.cacheZoomed ||
+			liveToolId !== this.cacheLiveId
+		) {
+			this.cacheVersion = v;
+			this.cacheMinRows = min;
+			this.cacheZoomed = zoomedTools;
+			this.cacheLiveId = liveToolId;
+			this.cacheByWidth.clear();
+		}
+		const cached = this.cacheByWidth.get(width);
+		if (cached) {
+			this.cacheByWidth.delete(width);
+			this.cacheByWidth.set(width, cached);
+			return cached;
+		}
+
+		const edge = th.fg("border", "│");
+		const innerWidth = Math.max(10, width - 3);
+		const filler = edge + " ".repeat(Math.max(0, width - 1));
+		const rows: string[] = [];
+
+		const emitLine = (content: string) => {
+			if (isRawImageLine(content)) {
+				rows.push(content);
+				return;
+			}
+			const clipped =
+				visibleWidth(content) > innerWidth
+					? truncateToWidth(content, innerWidth)
+					: content;
+			const reset = clipped.includes("\x1b[") ? "\x1b[0m" : "";
+			const padLen = Math.max(0, width - 2 - visibleWidth(clipped));
+			rows.push(edge + " " + clipped + reset + " ".repeat(padLen));
+		};
+
+		const live = liveEntry();
+		if (live) {
+			const items = liveToolItems(th, live, Math.max(8, width - 3));
+			const wrapped: string[] = [];
+			for (const item of items) {
+				if (typeof item !== "string") continue;
+				for (const w of wrapTextWithAnsi(
+					capDisplayLine(item, MAX_LINE_CHARS),
+					Math.max(1, width - 3),
+				)) {
+					wrapped.push(w);
+				}
+			}
+			const start = Math.max(0, wrapped.length - MAX_BODY_ROWS);
+			for (let i = start; i < wrapped.length; i++) emitLine(wrapped[i]!);
+		} else if (toolOrder.length === 0) {
+			emitLine(th.fg("dim", this.empty));
+		} else {
+			const liveComps = findLiveToolComponents();
+			for (const id of toolOrder) {
+				const entry = toolsBy.get(id);
+				if (!entry) continue;
+				const expanded =
+					toolMode === "full" || zoomedTools || entry.active || entry.isError;
+				emitLine(this.formatHeader(entry, expanded, innerWidth));
+
+				if (!expanded) continue;
+
+				const comp = liveComps.get(entry.id);
+				if (comp && typeof comp.render === "function") {
+					if ((comp as any).expanded !== true && typeof comp.setExpanded === "function") {
+						try {
+							comp.setExpanded(true);
+						} catch {
+							/* ignore component errors */
+						}
+					}
+					let rendered: string[] = [];
+					try {
+						rendered = stripLeadingTrailingBlankLines(comp.render(innerWidth));
+					} catch {
+						rendered = [];
+					}
+					if (rendered.length > 0) {
+						for (const line of rendered) emitLine(line);
+					} else {
+						this.renderFallbackBody(entry, innerWidth, width, zoomedTools, emitLine, rows);
+					}
+				} else {
+					this.renderFallbackBody(entry, innerWidth, width, zoomedTools, emitLine, rows);
+				}
+				// Visual separation after an expanded card.
+				rows.push(filler);
+			}
+		}
+
+		while (rows.length < min) rows.push(filler);
+
+		this.cacheByWidth.set(width, rows);
+		while (this.cacheByWidth.size > RichToolsBody.MAX_CACHED_WIDTHS) {
+			const oldest = this.cacheByWidth.keys().next().value as number;
+			this.cacheByWidth.delete(oldest);
+		}
+		return rows;
+	}
+
+	private formatHeader(e: ToolEntry, expanded: boolean, innerWidth: number): string {
+		const th = this.theme;
+		const caret = th.fg("muted", expanded ? "▾" : "▸");
+		const mark = e.active
+			? th.fg("warning", "⟳")
+			: e.isError
+				? th.fg("error", "✗")
+				: th.fg("success", "✓");
+		const name = th.fg("toolTitle", th.bold(e.name));
+		const badge = e.subagent ? th.fg("muted", ` [${e.agent ?? "sub"}]`) : "";
+		let dur = "";
+		if (e.startedAt !== undefined) {
+			if (e.endedAt !== undefined)
+				dur = th.fg("muted", ` ${formatDuration(e.endedAt - e.startedAt)}`);
+			else if (e.active && Date.now() - e.startedAt >= 1000)
+				dur = th.fg("muted", ` ${formatDuration(Date.now() - e.startedAt, true)}`);
+		}
+		const prefix = `${caret} ${mark} ${name}${badge}${dur}`;
+		const room = innerWidth - visibleWidth(prefix) - 1;
+		const summary = room >= 4 ? formatToolArgSummary(e.name, e.args, room) : "";
+		return summary ? `${prefix} ${th.fg("muted", summary)}` : prefix;
+	}
+
+	private renderFallbackBody(
+		entry: ToolEntry,
+		innerWidth: number,
+		width: number,
+		zoomedTools: boolean,
+		emitLine: (content: string) => void,
+		rows: string[],
+	): void {
+		const th = this.theme;
+		const bodyWidth = Math.max(8, innerWidth - 2);
+		let parsed: unknown;
+		if (entry.args) {
+			try {
+				parsed = JSON.parse(entry.args);
+			} catch {
+				parsed = undefined;
+			}
+		}
+
+		let emittedAny = false;
+
+		// 1. Pretty-printed syntax-highlighted JSON args (capped).
+		if (
+			parsed !== undefined &&
+			!(
+				typeof parsed === "object" &&
+				parsed !== null &&
+				!Array.isArray(parsed) &&
+				Object.keys(parsed).length === 0
+			)
+		) {
+			try {
+				const pretty = JSON.stringify(parsed, null, 2);
+				const argLines = highlightCode(pretty, "json");
+				const shown = argLines.slice(0, MAX_FALLBACK_ARG_LINES);
+				for (const l of shown) emitLine(`  ${l}`);
+				if (argLines.length > MAX_FALLBACK_ARG_LINES) {
+					emitLine(th.fg("dim", `  +${argLines.length - MAX_FALLBACK_ARG_LINES} more`));
+				}
+				emittedAny = true;
+			} catch {
+				/* skip unhighlightable args */
+			}
+		}
+
+		// 2. Edit diff if present.
+		if (entry.diff) {
+			for (const l of renderDiff(entry.diff).split(/\r?\n/)) {
+				emitLine(`  ${l}`);
+			}
+			emittedAny = true;
+		}
+
+		// 3. Syntax-highlighted output (if file path known for read/write), else toolOutput.
+		if (entry.output) {
+			const lower = entry.name.toLowerCase();
+			let lang: string | undefined;
+			if (
+				(lower === "read" || lower === "write") &&
+				parsed &&
+				typeof parsed === "object" &&
+				!Array.isArray(parsed) &&
+				typeof (parsed as Record<string, unknown>).path === "string"
+			) {
+				lang = getLanguageFromPath((parsed as Record<string, unknown>).path as string);
+			}
+			if (lang) {
+				try {
+					for (const hl of highlightCode(entry.output, lang)) {
+						for (const w of wrapTextWithAnsi(hl, bodyWidth)) emitLine(`  ${w}`);
+					}
+				} catch {
+					for (const raw of entry.output.split(/\r?\n/)) {
+						for (const w of wrapTextWithAnsi(
+							th.fg("toolOutput", capDisplayLine(raw, MAX_LINE_CHARS)),
+							bodyWidth,
+						))
+							emitLine(`  ${w}`);
+					}
+				}
+			} else {
+				for (const raw of entry.output.split(/\r?\n/)) {
+					for (const w of wrapTextWithAnsi(
+						th.fg("toolOutput", capDisplayLine(raw, MAX_LINE_CHARS)),
+						bodyWidth,
+					))
+						emitLine(`  ${w}`);
+				}
+			}
+			emittedAny = true;
+		}
+
+		// 4. Inline image if present.
+		if (entry.image) {
+			this.emitImage(
+				entry.image,
+				width,
+				zoomedTools ? undefined : BAND_IMAGE_ROWS,
+				emitLine,
+				rows,
+			);
+			emittedAny = true;
+		}
+
+		if (!emittedAny && entry.active) {
+			emitLine(th.fg("dim", "  …"));
+		}
+	}
+
+	private emitImage(
+		img: ImageBlock,
+		width: number,
+		maxRows: number | undefined,
+		emitLine: (content: string) => void,
+		rows: string[],
+	): void {
+		const th = this.theme;
+		if (!getCapabilities().images) {
+			const dims = getImageDimensions(img.data, img.mimeType) ?? undefined;
+			emitLine(th.fg("toolOutput", `  ${imageFallback(img.mimeType, dims)}`));
+			return;
+		}
+		const key = `${maxRows ?? ""}:${img.mimeType}:${img.data}`;
+		let component = this.imageCache.get(key);
+		if (component) {
+			this.imageCache.delete(key);
+			this.imageCache.set(key, component);
+		} else {
+			component = new Image(
+				img.data,
+				img.mimeType,
+				{ fallbackColor: (s: string) => th.fg("toolOutput", s) },
+				maxRows ? { maxHeightCells: maxRows } : {},
+			);
+			this.imageCache.set(key, component);
+			while (this.imageCache.size > RichToolsBody.MAX_CACHED_IMAGES) {
+				this.imageCache.delete(this.imageCache.keys().next().value as string);
+			}
+		}
+		const edge = th.fg("border", "│");
+		const inset = edge + "  ";
+		const blank = edge + " ".repeat(Math.max(0, width - 1));
+		for (const l of component.render(Math.max(1, width - 4))) {
+			rows.push(l ? inset + l : blank);
+		}
+	}
+
+	handleMouse(ev: TuiMouseEvent): TuiMouseEventResult | undefined {
+		return panelMouse(ev, this.ctl, "body");
+	}
+
+	invalidate(): void {
+		this.cacheVersion = -1;
+		this.cacheByWidth.clear();
+	}
+
+	dispose(): void {}
+}
+
 // ─── files panel (list + edit-diff subpanel) ──────────────────────────────────
 
 class FilesPanel {
@@ -1865,16 +2220,20 @@ function bandDef(theme: Theme, id: "thinking" | "tools"): BandDef {
 function framedPanel(theme: Theme, d: BandDef, ctl: PanelCtl): Component {
 	// Filler rows track the real viewport (band or zoomed), so the left edge
 	// stays continuous at any allocated height.
-	const body = new RecentBody(
-		theme,
-		d.style,
-		d.lines,
-		d.version,
-		d.empty,
-		() => ctl.scroll?.viewportHeight || bandHeight - 2,
-		ctl,
-		d.windowed ?? true,
-	);
+	const minRows = () => ctl.scroll?.viewportHeight || bandHeight - 2;
+	const body: Component =
+		ctl.id === "tools"
+			? new RichToolsBody(theme, d.version, d.empty, minRows, ctl)
+			: new RecentBody(
+					theme,
+					d.style,
+					d.lines,
+					d.version,
+					d.empty,
+					minRows,
+					ctl,
+					d.windowed ?? true,
+				);
 	const scroll = new ScrollView(body, {
 		follow: "end",
 		overscroll: "contain",

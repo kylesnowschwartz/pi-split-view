@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
+import * as path from "node:path";
 import {
 	appendStreamTail,
 	bashPathCandidates,
@@ -9,12 +11,14 @@ import {
 	dockColsFor,
 	filesPanelRowBudget,
 	formatDuration,
+	formatToolArgSummary,
 	headTailPreview,
 	isCappedToolText,
 	keepsInResponseOnly,
 	lastImageBlock,
 	liveTailLines,
 	outputPreview,
+	stripLeadingTrailingBlankLines,
 	thoughtsSinceLastUser,
 	truncateInline,
 } from "../helpers.ts";
@@ -504,3 +508,87 @@ test("filesPanelRowBudget shows diff section only when enabled and an edit diff 
 		diffRows: 0,
 	});
 });
+
+test("formatToolArgSummary formats read, edit, bash, grep, Agent, generic JSON, and non-JSON", () => {
+	const home = homedir();
+	// read: path (homedir shortened) + offset/limit
+	assert.equal(
+		formatToolArgSummary("read", JSON.stringify({ path: path.join(home, "proj/a.ts") })),
+		"~/proj/a.ts",
+	);
+	assert.equal(
+		formatToolArgSummary("read", JSON.stringify({ path: "src/app.ts", offset: 10, limit: 25 })),
+		"src/app.ts:10-34",
+	);
+	assert.equal(
+		formatToolArgSummary("read", JSON.stringify({ path: "src/app.ts", offset: 50 })),
+		"src/app.ts:50",
+	);
+	assert.equal(
+		formatToolArgSummary("read", JSON.stringify({ path: "src/app.ts", limit: 20 })),
+		"src/app.ts (limit 20)",
+	);
+	// edit & write
+	assert.equal(
+		formatToolArgSummary("edit", JSON.stringify({ path: "split-view.ts", edits: [] })),
+		"split-view.ts",
+	);
+	// bash: collapsed to one line
+	assert.equal(
+		formatToolArgSummary("bash", JSON.stringify({ command: "git status\n&& npm test" })),
+		"git status && npm test",
+	);
+	// grep / find / ls
+	assert.equal(
+		formatToolArgSummary("grep", JSON.stringify({ pattern: "RichToolsBody", path: "src/" })),
+		"RichToolsBody src/",
+	);
+	assert.equal(
+		formatToolArgSummary("grep", JSON.stringify({ pattern: "TODO" })),
+		"TODO",
+	);
+	// Agent: single description & tasks array
+	assert.equal(
+		formatToolArgSummary("Agent", JSON.stringify({ description: "Explore codebase" })),
+		"Explore codebase",
+	);
+	assert.equal(
+		formatToolArgSummary("Agent", JSON.stringify({ tasks: [{ id: 1 }, { id: 2 }, { id: 3 }] })),
+		"3 tasks",
+	);
+	assert.equal(
+		formatToolArgSummary("Agent", JSON.stringify({ tasks: [{ id: 1 }] })),
+		"1 task",
+	);
+	// Generic JSON object: key=val pairs
+	assert.equal(
+		formatToolArgSummary("custom_tool", JSON.stringify({ query: "hello", limit: 5, exact: true })),
+		"query=hello limit=5 exact=true",
+	);
+	// Empty JSON object
+	assert.equal(formatToolArgSummary("custom_tool", "{}"), "");
+	// Non-JSON string falls back to truncateInline
+	assert.equal(formatToolArgSummary("bash", "  not   valid\njson  ", 12), "not valid j…");
+});
+
+test("stripLeadingTrailingBlankLines trims blank and ANSI-only-whitespace lines", () => {
+	assert.deepEqual(
+		stripLeadingTrailingBlankLines([
+			"",
+			"   ",
+			"\x1b[32m   \x1b[0m",
+			"\x1b[1mhello\x1b[0m",
+			"",
+			"world",
+			"\x1b[0m  \t ",
+			"",
+		]),
+		["\x1b[1mhello\x1b[0m", "", "world"],
+	);
+	// All blank → empty array
+	assert.deepEqual(stripLeadingTrailingBlankLines(["", "\x1b[31m  \x1b[0m"]), []);
+	// Preserves Kitty/iTerm2 image escape lines as non-blank
+	const kitty = "\x1b_Ga=T,f=100;AAAA\x1b\\";
+	assert.deepEqual(stripLeadingTrailingBlankLines(["", kitty, ""]), [kitty]);
+});
+
