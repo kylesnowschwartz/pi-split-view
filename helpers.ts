@@ -478,6 +478,28 @@ export function stripLeadingTrailingBlankLines(lines: string[]): string[] {
 	return start > end ? [] : lines.slice(start, end + 1);
 }
 
+/** Global override for tool card expansion in the Tools panel. */
+export type ToolExpandGlobal = "all" | "none" | null;
+
+/**
+ * Whether a tool card in the Tools panel should render expanded.
+ * Precedence: per-tool override > zoomed tools panel > global override >
+ * default (active/running tools and errors stay expanded; clean completed
+ * tools auto-collapse).
+ */
+export function isToolExpanded(
+	entry: { id: string; active: boolean; isError: boolean },
+	overrides: ReadonlyMap<string, boolean>,
+	globalOverride: ToolExpandGlobal,
+	zoomedTools = false,
+): boolean {
+	if (overrides.has(entry.id)) return overrides.get(entry.id)!;
+	if (zoomedTools) return true;
+	if (globalOverride === "all") return true;
+	if (globalOverride === "none") return false;
+	return entry.active || entry.isError;
+}
+
 export default function (_pi: ExtensionAPI) {
 	/* shared helper module, not a real extension */
 }

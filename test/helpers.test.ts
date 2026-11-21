@@ -14,6 +14,7 @@ import {
 	formatToolArgSummary,
 	headTailPreview,
 	isCappedToolText,
+	isToolExpanded,
 	keepsInResponseOnly,
 	lastImageBlock,
 	liveTailLines,
@@ -591,4 +592,40 @@ test("stripLeadingTrailingBlankLines trims blank and ANSI-only-whitespace lines"
 	const kitty = "\x1b_Ga=T,f=100;AAAA\x1b\\";
 	assert.deepEqual(stripLeadingTrailingBlankLines(["", kitty, ""]), [kitty]);
 });
+
+test("isToolExpanded resolves precedence: override > zoom > global > default", () => {
+	const empty = new Map<string, boolean>();
+	const active = { id: "t1", active: true, isError: false };
+	const errored = { id: "t2", active: false, isError: true };
+	const clean = { id: "t3", active: false, isError: false };
+
+	// Default (globalOverride = null, not zoomed): active & error expand; clean collapses.
+	assert.equal(isToolExpanded(active, empty, null), true);
+	assert.equal(isToolExpanded(errored, empty, null), true);
+	assert.equal(isToolExpanded(clean, empty, null), false);
+
+	// Global "all" expands even clean completed tools.
+	assert.equal(isToolExpanded(clean, empty, "all"), true);
+	assert.equal(isToolExpanded(active, empty, "all"), true);
+
+	// Global "none" collapses even active & errored tools.
+	assert.equal(isToolExpanded(active, empty, "none"), false);
+	assert.equal(isToolExpanded(errored, empty, "none"), false);
+	assert.equal(isToolExpanded(clean, empty, "none"), false);
+
+	// zoomedTools expands everything (including when globalOverride === "none").
+	assert.equal(isToolExpanded(clean, empty, null, true), true);
+	assert.equal(isToolExpanded(clean, empty, "none", true), true);
+
+	// Per-tool override beats default, global, AND zoomedTools.
+	const overrides = new Map<string, boolean>([
+		["t1", false],
+		["t3", true],
+	]);
+	assert.equal(isToolExpanded(active, overrides, null), false);
+	assert.equal(isToolExpanded(active, overrides, "all", true), false);
+	assert.equal(isToolExpanded(clean, overrides, null), true);
+	assert.equal(isToolExpanded(clean, overrides, "none"), true);
+});
+
 

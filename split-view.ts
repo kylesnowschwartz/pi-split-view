@@ -146,6 +146,7 @@ import {
 	formatToolArgSummary,
 	headTailPreview,
 	isCappedToolText,
+	isToolExpanded,
 	keepsInResponseOnly,
 	lastImageBlock,
 	liveTailLines,
@@ -154,6 +155,7 @@ import {
 	truncateInline,
 	thoughtsSinceLastUser,
 	type ImageBlock,
+	type ToolExpandGlobal,
 } from "./helpers.ts";
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -718,6 +720,10 @@ interface ToolEntry {
 }
 const toolsBy = new Map<string, ToolEntry>();
 const toolOrder: string[] = [];
+/** Per-tool manual expand/collapse overrides (cleared on session reset). */
+const toolExpandOverrides = new Map<string, boolean>();
+/** Global expand override for tool cards (null = auto: running & errors). */
+let toolExpandGlobal: ToolExpandGlobal = null;
 
 /** Running tools that stream partial output, oldest → newest. */
 function streamingActiveIds(): string[] {
@@ -837,6 +843,7 @@ function ingestToolCall(id: string, name: string, args: any, startedAt?: number)
 	if (toolOrder.length > MAX_TOOLS) {
 		const evict = toolOrder.shift()!;
 		toolsBy.delete(evict);
+		toolExpandOverrides.delete(evict);
 		if (evict === liveToolId) liveToolId = null;
 	}
 }
@@ -1713,7 +1720,11 @@ class RichToolsBody implements Component {
 	private cacheMinRows = -1;
 	private cacheZoomed = false;
 	private cacheLiveId: string | null = null;
-	private cacheByWidth = new Map<number, string[]>();
+	private cacheByWidth = new Map<
+		number,
+		{ rows: string[]; headerRows: Map<number, string> }
+	>();
+	private headerRows = new Map<number, string>();
 	private static readonly MAX_CACHED_WIDTHS = 4;
 	private imageCache = new Map<string, Image>();
 	private static readonly MAX_CACHED_IMAGES = 8;
@@ -1747,13 +1758,15 @@ class RichToolsBody implements Component {
 		if (cached) {
 			this.cacheByWidth.delete(width);
 			this.cacheByWidth.set(width, cached);
-			return cached;
+			this.headerRows = cached.headerRows;
+			return cached.rows;
 		}
 
 		const edge = th.fg("border", "│");
 		const innerWidth = Math.max(10, width - 3);
 		const filler = edge + " ".repeat(Math.max(0, width - 1));
 		const rows: string[] = [];
+		const headerRows = new Map<number, string>();
 
 		const emitLine = (content: string) => {
 			if (isRawImageLine(content)) {
@@ -1791,8 +1804,13 @@ class RichToolsBody implements Component {
 			for (const id of toolOrder) {
 				const entry = toolsBy.get(id);
 				if (!entry) continue;
-				const expanded =
-					toolMode === "full" || zoomedTools || entry.active || entry.isError;
+				const expanded = isToolExpanded(
+					entry,
+					toolExpandOverrides,
+					toolExpandGlobal,
+					zoomedTools,
+				);
+				headerRows.set(rows.length, entry.id);
 				emitLine(this.formatHeader(entry, expanded, innerWidth));
 
 				if (!expanded) continue;
@@ -1827,7 +1845,8 @@ class RichToolsBody implements Component {
 
 		while (rows.length < min) rows.push(filler);
 
-		this.cacheByWidth.set(width, rows);
+		this.headerRows = headerRows;
+		this.cacheByWidth.set(width, { rows, headerRows });
 		while (this.cacheByWidth.size > RichToolsBody.MAX_CACHED_WIDTHS) {
 			const oldest = this.cacheByWidth.keys().next().value as number;
 			this.cacheByWidth.delete(oldest);
@@ -2006,7 +2025,29 @@ class RichToolsBody implements Component {
 	}
 
 	handleMouse(ev: TuiMouseEvent): TuiMouseEventResult | undefined {
-		return panelMouse(ev, this.ctl, "body");
+		const res = panelMouse(ev, this.ctl, "body");
+		if (res) return res;
+		if (ev.button !== "left" || ev.x <= 0) return undefined;
+		if (ev.type === "press" && this.headerRows.has(ev.y)) {
+			return { capture: true };
+		}
+		if (ev.type === "click") {
+			const id = this.headerRows.get(ev.y);
+			if (id && toolsBy.has(id)) {
+				const entry = toolsBy.get(id)!;
+				const currentlyExpanded = isToolExpanded(
+					entry,
+					toolExpandOverrides,
+					toolExpandGlobal,
+					zoomed === "tools",
+				);
+				toolExpandOverrides.set(id, !currentlyExpanded);
+				toolsVersionCounter++;
+				requestRender();
+				return { handled: true };
+			}
+		}
+		return undefined;
 	}
 
 	invalidate(): void {
@@ -2768,6 +2809,7 @@ export default function (pi: ExtensionAPI) {
 		thinking.reset();
 		toolsBy.clear();
 		toolOrder.length = 0;
+		toolExpandOverrides.clear();
 		liveToolId = null;
 		toolsVersionCounter++;
 		files.clear();
@@ -2867,6 +2909,7 @@ export default function (pi: ExtensionAPI) {
 		syncFlagsFromSlots();
 		thinkingScope = cfg.thinkingScope;
 		toolMode = cfg.toolMode;
+		toolExpandGlobal = toolMode === "full" ? "all" : null;
 		bandHeight = cfg.bandHeight;
 		toolsWidthPct = cfg.toolsWidthPct;
 		filesWidth = cfg.filesWidth;
@@ -3093,6 +3136,7 @@ export default function (pi: ExtensionAPI) {
 		if (toolOrder.length > MAX_TOOLS) {
 			const evict = toolOrder.shift()!;
 			toolsBy.delete(evict);
+			toolExpandOverrides.delete(evict);
 		}
 		if (anyPanelActive()) requestRender();
 	});
@@ -3375,9 +3419,47 @@ export default function (pi: ExtensionAPI) {
 		description: "Toggle tool panel compact ↔ full detail",
 		handler: async (_args, ctx) => {
 			toolMode = toolMode === "compact" ? "full" : "compact";
+			toolExpandOverrides.clear();
+			toolExpandGlobal = toolMode === "full" ? "all" : null;
 			toolsVersionCounter++;
 			ctx.ui.notify(`Tool panel: ${toolMode}`, "info");
 			requestRender();
+		},
+	});
+
+	pi.registerCommand("split-tools-expand", {
+		description: "Expand/collapse all tool cards (all | collapse | auto; omit to cycle)",
+		handler: async (args, ctx) => {
+			const arg = String(args ?? "").trim().toLowerCase();
+			let next: ToolExpandGlobal;
+			if (!arg) {
+				next =
+					toolExpandGlobal === null
+						? "all"
+						: toolExpandGlobal === "all"
+							? "none"
+							: null;
+			} else if (arg === "all") {
+				next = "all";
+			} else if (arg === "collapse" || arg === "none") {
+				next = "none";
+			} else if (arg === "auto") {
+				next = null;
+			} else {
+				ctx.ui.notify("Usage: /split-tools-expand [all|collapse|auto]", "warning");
+				return;
+			}
+			toolExpandOverrides.clear();
+			toolExpandGlobal = next;
+			toolsVersionCounter++;
+			requestRender();
+			const label =
+				next === "all"
+					? "expand all"
+					: next === "none"
+						? "collapse all"
+						: "auto (running & errors)";
+			ctx.ui.notify(`Tool cards: ${label}`, "info");
 		},
 	});
 
