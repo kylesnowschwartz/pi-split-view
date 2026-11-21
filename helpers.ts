@@ -247,22 +247,39 @@ export function thoughtsSinceLastUser(
 	return out;
 }
 
+/** True when text is raw internal agent notification XML (<task-notification> or <progress-warning>). */
+export function isInternalNotificationText(text: string): boolean {
+	const trimmed = text.trim();
+	return (
+		trimmed.startsWith("<task-notification>") ||
+		trimmed.startsWith("<progress-warning>")
+	);
+}
+
 /** pi auto-discovers every *.ts in an extensions dir; no-op factory. */
 /** As much of a pi transcript component as `keepsInResponseOnly` reads. */
 export interface TranscriptChild {
 	constructor: { name: string };
 	lastMessage?: { content?: unknown };
+	text?: unknown;
 }
 
 /**
  * Whether response-only mode with responseSource "transcript" draws a child
  * of pi's transcript: everything but tool calls (the Tool Usage panel owns
- * those) and assistant messages with no text, which would draw only a
- * thinking label or nothing.
+ * those), internal task-notification/progress-warning user messages, and
+ * assistant messages with no text, which would draw only a thinking label or
+ * nothing.
  */
 export function keepsInResponseOnly(child: TranscriptChild): boolean {
 	const kind = child?.constructor?.name;
 	if (kind === "ToolExecutionComponent") return false;
+	if (kind === "UserMessageComponent") {
+		const text = (child as any).text;
+		if (typeof text === "string" && isInternalNotificationText(text))
+			return false;
+		return true;
+	}
 	if (kind !== "AssistantMessageComponent") return true;
 	const content = child.lastMessage?.content;
 	if (!Array.isArray(content)) return true;

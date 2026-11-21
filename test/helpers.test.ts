@@ -14,6 +14,7 @@ import {
 	formatToolArgSummary,
 	headTailPreview,
 	isCappedToolText,
+	isInternalNotificationText,
 	isToolExpanded,
 	keepsInResponseOnly,
 	lastImageBlock,
@@ -291,6 +292,38 @@ test("keepsInResponseOnly drops tool calls and text-less assistant messages only
 	);
 	// Still streaming, with no message yet: kept, it draws nothing.
 	assert.equal(keepsInResponseOnly(child("AssistantMessageComponent")), true);
+});
+
+test("isInternalNotificationText matches task-notification and progress-warning XML only", () => {
+	assert.equal(
+		isInternalNotificationText("<task-notification>\n<task-id>1</task-id>\n</task-notification>"),
+		true,
+	);
+	assert.equal(
+		isInternalNotificationText("  \n\t<progress-warning>\n<summary>x</summary>\n</progress-warning>"),
+		true,
+	);
+	assert.equal(isInternalNotificationText("Please inspect <task-notification> rendering"), false);
+	assert.equal(isInternalNotificationText("normal user message"), false);
+	assert.equal(isInternalNotificationText(""), false);
+});
+
+test("keepsInResponseOnly drops internal notification user components while keeping normal user messages", () => {
+	const user = (text?: unknown) => ({
+		constructor: { name: "UserMessageComponent" },
+		text,
+	});
+	assert.equal(
+		keepsInResponseOnly(user("<task-notification>\n<status>completed</status>\n</task-notification>")),
+		false,
+	);
+	assert.equal(
+		keepsInResponseOnly(user("  <progress-warning>\n<summary>work</summary>\n</progress-warning>")),
+		false,
+	);
+	assert.equal(keepsInResponseOnly(user("Explain <task-notification>")), true);
+	assert.equal(keepsInResponseOnly(user("Hello")), true);
+	assert.equal(keepsInResponseOnly(user(undefined)), true);
 });
 
 test("normalizeConfig reads responseSource strictly", () => {

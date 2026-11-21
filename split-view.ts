@@ -162,6 +162,7 @@ import {
 	formatToolArgSummary,
 	headTailPreview,
 	isCappedToolText,
+	isInternalNotificationText,
 	isToolExpanded,
 	keepsInResponseOnly,
 	lastImageBlock,
@@ -673,7 +674,7 @@ function addResponseMessage(msg: any): void {
 	try {
 		if (msg.role === "user") {
 			const text = messageText(msg);
-			if (!text.trim()) return;
+			if (!text.trim() || isInternalNotificationText(text)) return;
 			beginResponseEntry("user");
 			responseDoc.addChild(new UserMessageComponent(text, getMarkdownTheme()));
 			return;
@@ -3262,6 +3263,11 @@ class ResponseBody implements Component {
 			for (const l of childLines) lines.push(l);
 			const endRow = this.rowOffset + lines.length;
 			if (child.constructor?.name === "UserMessageComponent") {
+				const childText = (child as any).text;
+				if (typeof childText === "string" && isInternalNotificationText(childText)) {
+					if (activeSpan) activeSpan.endRow = endRow;
+					continue;
+				}
 				turn++;
 				activeSpan = { turn, startRow, endRow };
 				spans.push(activeSpan);
@@ -3488,8 +3494,10 @@ export default function (pi: ExtensionAPI) {
 			const msg = (entry as any).message;
 			if (!msg) continue;
 			if (msg.role === "user") {
+				const text = messageText(msg);
+				if (isInternalNotificationText(text)) continue;
 				currentTurn++;
-				const preview = truncateInline(messageText(msg), 32);
+				const preview = truncateInline(text, 32);
 				if (preview) turnPreviews.set(currentTurn, preview);
 			}
 			const msgThoughts: string[] = [];
@@ -3665,16 +3673,19 @@ export default function (pi: ExtensionAPI) {
 		// Clearing on thinking_start instead would wipe the earlier blocks of the
 		// SAME turn, since one assistant message can stream several of them.
 		if (msg?.role === "user") {
-			currentTurn++;
-			const preview = truncateInline(messageText(msg), 32);
-			if (preview) turnPreviews.set(currentTurn, preview);
-			pinnedTurn = null;
-			toolsVersionCounter++;
-			thinking.version++;
-			if (thinkingScope === "turn") {
-				thinking.reset();
+			const text = messageText(msg);
+			if (!isInternalNotificationText(text)) {
+				currentTurn++;
+				const preview = truncateInline(text, 32);
+				if (preview) turnPreviews.set(currentTurn, preview);
+				pinnedTurn = null;
+				toolsVersionCounter++;
+				thinking.version++;
+				if (thinkingScope === "turn") {
+					thinking.reset();
+				}
+				addResponseMessage(msg);
 			}
-			addResponseMessage(msg);
 		}
 		if (anyPanelActive()) requestRender();
 	});
