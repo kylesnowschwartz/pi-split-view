@@ -417,8 +417,9 @@ test("normalizeConfig: explicit slots normalize, deduplicate, and sync flags", (
 	assert.equal(allBad.files, false);
 });
 
-test("LAYOUT_PRESETS: all 5 presets exist and normalize cleanly", () => {
+test("LAYOUT_PRESETS: all 6 presets exist and normalize cleanly", () => {
 	const names: PresetName[] = [
+		"chat-left",
 		"classic",
 		"workbench",
 		"sidebar-chat",
@@ -433,12 +434,17 @@ test("LAYOUT_PRESETS: all 5 presets exist and normalize cleanly", () => {
 			bandHeight: p.bandHeight,
 			toolsWidthPct: p.toolsWidthPct,
 			...(p.filesWidth === null ? {} : { filesWidth: p.filesWidth }),
+			...(p.dockSide ? { dockSide: p.dockSide } : {}),
 		});
 		assert.deepEqual(norm.slots, p.slots);
 		assert.equal(norm.bandHeight, p.bandHeight);
 		assert.equal(norm.toolsWidthPct, p.toolsWidthPct);
 		assert.equal(norm.filesWidth, p.filesWidth);
+		assert.equal(norm.dockSide, p.dockSide ?? "right");
 	}
+	assert.equal(normalizeConfig({}).dockSide, "right");
+	assert.equal(normalizeConfig({ dockSide: "left" }).dockSide, "left");
+	assert.equal(normalizeConfig({ dockSide: "bogus" as any }).dockSide, "right");
 });
 
 test("assignSlot assigns to empty slot, swaps occupied slots, and clears with null", () => {

@@ -123,6 +123,7 @@ import {
 	type PresetName,
 	type SlotName,
 	type SlotPanel,
+	type DockSide,
 	type ToolMode as ToolModeCfg,
 	type ThinkingScope,
 	type ThinkingHudMode,
@@ -284,6 +285,8 @@ function enqueueRecentThinkingLines(maxLines = 8): void {
 }
 let toolsOn = true;
 let filesOn = false;
+/** Which side of the terminal the dock column sits on ("left" | "right"). */
+let dockSide: DockSide = "right";
 /** Files panel edit-diff subpanel (session-local; /split-diff, persisted by
  * /split-save). Off keeps the file list but drops the bottom diff section. */
 let showDiff = true;
@@ -1282,7 +1285,10 @@ function applyGeometry(): void {
 	composedTermCols = cols;
 	const dockEntry = stackEntry(geo.dockStack, geo.dockPanel);
 	if (dockEntry) {
-		const w = dockColsFor(cols);
+		const w =
+			layoutSlots.dock === "messages"
+				? Math.min(dockColsFor(cols), Math.max(24, cols - 20))
+				: dockColsFor(cols);
 		dockEntry.basis = w;
 		dockEntry.minSize = w;
 	}
@@ -1335,7 +1341,8 @@ function continueDrag(ev: TuiMouseEvent): TuiMouseEventResult {
 		const w = d.start - (ev.screenX - d.x);
 		toolsWidthPct = Math.max(20, Math.min(80, Math.round((w * 100) / base)));
 	} else {
-		filesWidth = dockColsForManual(cols, d.start - (ev.screenX - d.x));
+		const delta = dockSide === "left" ? ev.screenX - d.x : -(ev.screenX - d.x);
+		filesWidth = dockColsForManual(cols, d.start + delta);
 	}
 	applyGeometry();
 	return { handled: true };
@@ -2664,13 +2671,23 @@ function buildBand(
 	// the terminal minus a visible right dock). Single panels take the full
 	// width. applyGeometry() sets the bases and re-applies them on drags and
 	// resizes without rebuilding the tree.
+	const hasDock =
+		layoutSlots.dock !== null &&
+		tuiRef &&
+		typeof tuiRef.setLayoutRoot === "function";
 	const splitBand = slots.length === 2;
 	const panels = slots.map(({ slot, id }) =>
 		buildSlotPanel(theme, id, slot, base, {
 			id,
 			inBand: true,
-			// The boundary between the two band slots is the right panel's left edge.
-			resizeLeft: splitBand && slot === "topRight" ? "tools" : false,
+			// The boundary between the two band slots is the right panel's left edge;
+			// when the dock is on the left, the left band panel's left edge drags the dock.
+			resizeLeft:
+				splitBand && slot === "topRight"
+					? "tools"
+					: dockSide === "left" && hasDock && slot === "topLeft"
+						? "dock"
+						: false,
 		}),
 	);
 	const band = splitBand
@@ -2724,36 +2741,55 @@ function buildFilesDock(
 	inner: Component,
 	base: Component | null,
 	dockId: Exclude<SlotPanel, null>,
+	editorInDock: Component | null = null,
 ): Component {
 	const cols = tuiRef?.terminal?.columns ?? 120;
-	const panelCols = dockColsFor(cols);
+	const panelCols = editorInDock
+		? Math.min(dockColsFor(cols), Math.max(24, cols - 20))
+		: dockColsFor(cols);
 	const panel = buildSlotPanel(theme, dockId, "dock", base, {
 		id: dockId,
 		inBand: false,
-		resizeLeft: "dock",
+		resizeLeft: dockSide === "right" ? "dock" : false,
 	});
-	// Wrap the left subtree in a MeasurementSafeVStack — the dock HStack's
+	const dockContainer: Component = editorInDock
+		? new MeasurementSafeVStack([
+				{ component: panel, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+				{ component: editorInDock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+			])
+		: panel;
+	// Wrap the main subtree in a MeasurementSafeVStack — the dock HStack's
 	// discarded intrinsic-height measurement would otherwise eagerly render the
-	// ENTIRE left side (band + main) every keystroke frame. ENTRY FORM
+	// ENTIRE main side (band + main) every keystroke frame. ENTRY FORM
 	// MATTERS: a bare component defaults to grow:0, and this wrapper's sentinel
-	// render measures as 1 row — a shorter-than-screen left subtree would then
+	// render measures as 1 row — a shorter-than-screen subtree would then
 	// collapse to its intrinsic height instead of stretching.
-	const left = new MeasurementSafeVStack([
+	const mainSide = new MeasurementSafeVStack([
 		{ component: inner, basis: 0, grow: 1, shrink: 1, minSize: 1 },
 	]);
-	const stack = new HStack([
-		{ component: left, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-		{
-			component: panel,
-			basis: panelCols,
-			grow: 0,
-			shrink: 0,
-			minSize: panelCols,
-			visible: (v: { width: number }) => v.width >= MIN_TERM_WIDTH,
-		},
-	]);
+	const dockEntry = {
+		component: dockContainer,
+		basis: panelCols,
+		grow: 0,
+		shrink: 0,
+		minSize: panelCols,
+		// Never auto-hide the dock when it hosts Pi's prompt editor.
+		...(editorInDock
+			? {}
+			: { visible: (v: { width: number }) => v.width >= MIN_TERM_WIDTH }),
+	};
+	const mainEntry = {
+		component: mainSide,
+		basis: 0,
+		grow: 1,
+		shrink: 1,
+		minSize: 1,
+	};
+	const stack = new HStack(
+		dockSide === "left" ? [dockEntry, mainEntry] : [mainEntry, dockEntry],
+	);
 	geo.dockStack = stack;
-	geo.dockPanel = panel;
+	geo.dockPanel = dockContainer;
 	return stack;
 }
 
@@ -2975,27 +3011,41 @@ function composeLayout(theme: Theme, inner: Component): Component {
 	}
 	const base = getBaseRoot();
 	const editorDock = base ? baseDockOf(base) : null;
+	const hasDock =
+		layoutSlots.dock !== null &&
+		tuiRef &&
+		typeof tuiRef.setLayoutRoot === "function";
+	// When Messages lives in the dock, keep Pi's prompt editor directly beneath
+	// Messages at the dock's width so conversation and input share one column.
+	const editorInDock = Boolean(
+		base && editorDock && hasDock && layoutSlots.dock === "messages",
+	);
 
-	// Build main region with editorDock ALWAYS pinned at the bottom of the left column.
+	// Build main region. When editorInDock is true, the editor moves under
+	// Messages in the dock column so the main panel gets full height.
 	let root: Component;
 	if (base && editorDock) {
-		if (layoutSlots.main === "messages" && !trimResponse) {
+		if (!editorInDock && layoutSlots.main === "messages" && !trimResponse) {
 			root = inner;
 		} else if (layoutSlots.main !== null) {
 			const mainComp = buildSlotPanel(theme, layoutSlots.main, "main", base, {
 				id: layoutSlots.main,
 				inBand: false,
-				resizeLeft: false,
+				resizeLeft: dockSide === "left" && hasDock ? "dock" : false,
 			});
-			root = new VStack([
-				{ component: mainComp, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-				{ component: editorDock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
-			]);
+			root = editorInDock
+				? mainComp
+				: new VStack([
+						{ component: mainComp, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+						{ component: editorDock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+					]);
 		} else {
-			root = new VStack([
-				{ component: new Spacer(1), basis: 0, grow: 1, shrink: 1, minSize: 1 },
-				{ component: editorDock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
-			]);
+			root = editorInDock
+				? new Spacer(1)
+				: new VStack([
+						{ component: new Spacer(1), basis: 0, grow: 1, shrink: 1, minSize: 1 },
+						{ component: editorDock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+					]);
 		}
 	} else {
 		root = inner;
@@ -3004,12 +3054,14 @@ function composeLayout(theme: Theme, inner: Component): Component {
 	const wantBand =
 		layoutSlots.topLeft !== null || layoutSlots.topRight !== null;
 	if (wantBand) root = buildBand(theme, root, base);
-	if (
-		layoutSlots.dock !== null &&
-		tuiRef &&
-		typeof tuiRef.setLayoutRoot === "function"
-	) {
-		root = buildFilesDock(theme, root, base, layoutSlots.dock);
+	if (hasDock && layoutSlots.dock !== null) {
+		root = buildFilesDock(
+			theme,
+			root,
+			base,
+			layoutSlots.dock,
+			editorInDock ? editorDock : null,
+		);
 	}
 	// Set the real bases (dock width, band height, width split) on the
 	// freshly built entries.
@@ -3214,6 +3266,7 @@ export default function (pi: ExtensionAPI) {
 		bandHeight = cfg.bandHeight;
 		toolsWidthPct = cfg.toolsWidthPct;
 		filesWidth = cfg.filesWidth;
+		dockSide = cfg.dockSide;
 		zoomed = null;
 		showDiff = cfg.diff;
 		answerDividerMode = cfg.answerDivider;
@@ -3877,12 +3930,16 @@ export default function (pi: ExtensionAPI) {
 
 	const PRESET_OPTIONS: { name: PresetName; label: string }[] = [
 		{
+			name: "chat-left",
+			label: "chat-left — Messages + prompt left · Thinking + Tools right",
+		},
+		{
 			name: "workbench",
 			label: "workbench — Tools main · Thinking | Messages top · Files dock",
 		},
 		{
 			name: "sidebar-chat",
-			label: "sidebar-chat — Tools main · Thinking top · Messages dock",
+			label: "sidebar-chat — Tools main · Thinking top · Messages dock right",
 		},
 		{
 			name: "classic",
@@ -3900,7 +3957,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("split-preset", {
 		description:
-			"Apply a layout preset (workbench | sidebar-chat | classic | deep-think | focused-tools)",
+			"Apply a layout preset (chat-left | workbench | sidebar-chat | classic | deep-think | focused-tools)",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/split-preset requires interactive mode", "error");
@@ -3933,6 +3990,7 @@ export default function (pi: ExtensionAPI) {
 			bandHeight = preset.bandHeight;
 			toolsWidthPct = preset.toolsWidthPct;
 			filesWidth = preset.filesWidth;
+			dockSide = preset.dockSide ?? "right";
 			zoomed = null;
 			syncFlagsFromSlots();
 			const base = getBaseRoot();
@@ -4092,6 +4150,18 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("split-dock-side", {
+		description: "Move the dock column to the left or right (left | right)",
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") return;
+			const arg = String(args ?? "").trim().toLowerCase();
+			if (arg === "left" || arg === "right") dockSide = arg;
+			else dockSide = dockSide === "left" ? "right" : "left";
+			reconcileLayout(ctx.ui.theme);
+			ctx.ui.notify(`Dock side: ${dockSide}`, "info");
+		},
+	});
+
 	pi.registerCommand("split-save", {
 		description: "Save current panel layout as the startup defaults",
 		handler: async (_args, ctx) => {
@@ -4118,6 +4188,7 @@ export default function (pi: ExtensionAPI) {
 				bandHeight,
 				toolsWidthPct,
 				...(filesWidth === null ? {} : { filesWidth }),
+				dockSide,
 				diff: showDiff,
 				answerDivider: answerDividerMode,
 				responseSource,

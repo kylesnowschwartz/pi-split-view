@@ -30,7 +30,9 @@ export type ResponseSource = "messages" | "transcript";
 export type SlotName = "topLeft" | "topRight" | "main" | "dock";
 export type SlotPanel = "thinking" | "tools" | "messages" | "files" | null;
 export type LayoutSlots = Record<SlotName, SlotPanel>;
+export type DockSide = "left" | "right";
 export type PresetName =
+	| "chat-left"
 	| "workbench"
 	| "sidebar-chat"
 	| "classic"
@@ -42,9 +44,22 @@ export interface LayoutPreset {
 	bandHeight: number;
 	toolsWidthPct: number;
 	filesWidth: number | null;
+	dockSide?: DockSide;
 }
 
 export const LAYOUT_PRESETS: Record<PresetName, LayoutPreset> = {
+	"chat-left": {
+		slots: {
+			topLeft: "thinking",
+			topRight: null,
+			main: "tools",
+			dock: "messages",
+		},
+		bandHeight: 13,
+		toolsWidthPct: 50,
+		filesWidth: 74,
+		dockSide: "left",
+	},
 	classic: {
 		slots: {
 			topLeft: "thinking",
@@ -168,6 +183,9 @@ export interface UiPanelsConfig {
 	/** Dock width in columns (set by dragging its edge). Absent = auto
 	 * (25% of the terminal, 34–48 cols). */
 	filesWidth?: number;
+	/** Which side of the terminal the dock column sits on ("left" | "right").
+	 * Defaults to "right". */
+	dockSide?: DockSide;
 	/** Named layout slot assignments (topLeft, topRight, main, dock). */
 	slots?: Partial<LayoutSlots>;
 }
@@ -203,6 +221,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 	bandHeight: number;
 	toolsWidthPct: number;
 	filesWidth: number | null;
+	dockSide: DockSide;
 	slots: LayoutSlots;
 }> {
 	// SV-12: tolerate any shape — a null root, an array or a primitive reads
@@ -322,6 +341,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		bandHeight,
 		toolsWidthPct,
 		filesWidth,
+		dockSide: root.dockSide === "left" ? "left" : "right",
 		slots,
 	};
 }
