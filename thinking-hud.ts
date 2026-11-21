@@ -12,7 +12,6 @@
  */
 
 import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export type ThinkingRole =
@@ -1018,6 +1017,7 @@ export class ThinkingAiRefiner {
 		const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
 		try {
+			const { completeSimple } = await import("@earendil-works/pi-ai/compat");
 			const res = await completeSimple(
 				model,
 				{
