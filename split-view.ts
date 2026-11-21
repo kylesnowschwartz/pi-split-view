@@ -1825,18 +1825,24 @@ class RichToolsBody implements Component {
 
 				const comp = liveComps.get(entry.id);
 				if (comp && typeof comp.render === "function") {
-					if ((comp as any).expanded !== true && typeof comp.setExpanded === "function") {
-						try {
-							comp.setExpanded(true);
-						} catch {
-							/* ignore component errors */
-						}
-					}
+					const prevExpanded = Boolean((comp as any).expanded);
+					const canToggle = typeof comp.setExpanded === "function";
 					let rendered: string[] = [];
 					try {
+						if (!prevExpanded && canToggle) {
+							comp.setExpanded(true);
+						}
 						rendered = stripLeadingTrailingBlankLines(comp.render(innerWidth));
 					} catch {
 						rendered = [];
+					} finally {
+						if (!prevExpanded && canToggle) {
+							try {
+								comp.setExpanded(prevExpanded);
+							} catch {
+								/* ignore restore errors */
+							}
+						}
 					}
 					if (rendered.length > 0) {
 						for (const line of rendered) emitLine(line);
@@ -2354,7 +2360,7 @@ function buildSlotPanel(
 			// slot === "main": terminal rows minus band (if visible & fits) and editor dock.
 			const cols = tuiRef?.terminal?.columns ?? 80;
 			const editorDock = base ? baseDockOf(base) : null;
-			const dockH = editorDock ? editorDock.render(cols).length : 0;
+			const dockH = editorDock ? editorDock.render(bandBase(cols)).length : 0;
 			const hasBand =
 				(layoutSlots.topLeft !== null || layoutSlots.topRight !== null) &&
 				rows - bandHeight - 1 >= MIN_ROWS_BELOW_BAND;

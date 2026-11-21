@@ -269,7 +269,8 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		slots = out;
 		thinking = seen.has("thinking");
 		tools = seen.has("tools");
-		files = seen.has("files");
+		// Preserve regular-mode files overlay persistence (files: true with no dock slot).
+		files = seen.has("files") || boolOr(root.files, false);
 		split =
 			slots.topLeft !== null ||
 			slots.topRight !== null ||

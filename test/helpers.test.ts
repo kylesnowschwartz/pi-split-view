@@ -733,5 +733,26 @@ test("normalizeConfig handles thinkingHud with strict boolean default true", () 
 	assert.equal(normalizeConfig({ thinkingHud: null as any }).thinkingHud, true);
 });
 
+test("normalizeConfig preserves regular-mode files: true when slots has no files slot", () => {
+	const regularFiles = normalizeConfig({
+		split: false,
+		thinking: false,
+		tools: false,
+		files: true,
+		slots: { topLeft: null, topRight: null, main: "messages", dock: null },
+	});
+	assert.equal(regularFiles.files, true);
+	assert.equal(regularFiles.slots.dock, null);
+
+	const hiddenFiles = normalizeConfig({
+		split: false,
+		thinking: false,
+		tools: false,
+		files: false,
+		slots: { topLeft: null, topRight: null, main: "messages", dock: null },
+	});
+	assert.equal(hiddenFiles.files, false);
+});
+
 
 
