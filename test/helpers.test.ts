@@ -20,8 +20,11 @@ import {
 	liveTailLines,
 	outputPreview,
 	stripLeadingTrailingBlankLines,
+	styleThinkingLine,
 	thoughtsSinceLastUser,
+	tokenizeThinkingLine,
 	truncateInline,
+	type ThinkingPalette,
 } from "../helpers.ts";
 import {
 	assignSlot,
@@ -627,5 +630,108 @@ test("isToolExpanded resolves precedence: override > zoom > global > default", (
 	assert.equal(isToolExpanded(clean, overrides, null), true);
 	assert.equal(isToolExpanded(clean, overrides, "none"), true);
 });
+
+test("tokenizeThinkingLine highlights semantic cues with lossless round-trip", () => {
+	const samples = [
+		"**Step 1**: Wait, check `foo()` in split-view.ts and src/a/b.ts (v1.5.0).",
+		"Maybe there is a bug or error in ~/.pi/agent/ui-panels.json; let's plan to refactor via bash and Agent.",
+		"Actually, the tests passed — verified with evidence using read and edit on package.json.",
+		"See https://example.com/error/test.ts for version 1.5.0 and agent notes.",
+		"Plain prose without any special cues at all.",
+		"",
+	];
+	for (const line of samples) {
+		const tokens = tokenizeThinkingLine(line);
+		assert.equal(
+			tokens.map((t) => t.text).join(""),
+			line,
+			`lossless round-trip failed for: ${line}`,
+		);
+		for (let i = 1; i < tokens.length; i++) {
+			assert.notEqual(
+				tokens[i - 1]!.kind === "plain" && tokens[i]!.kind === "plain",
+				true,
+				`adjacent plain tokens were not merged in: ${line}`,
+			);
+		}
+	}
+
+	// Headings, inline code, and paths take priority over inner keywords.
+	assert.deepEqual(
+		tokenizeThinkingLine("**Plan next** and `check()` in split-view.ts and src/a/b.ts"),
+		[
+			{ kind: "heading", text: "**Plan next**" },
+			{ kind: "plain", text: " and " },
+			{ kind: "code", text: "`check()`" },
+			{ kind: "plain", text: " in " },
+			{ kind: "path", text: "split-view.ts" },
+			{ kind: "plain", text: " and " },
+			{ kind: "path", text: "src/a/b.ts" },
+		],
+	);
+
+	// Version numbers and bare URLs are NOT matched as paths or inner keywords.
+	assert.deepEqual(
+		tokenizeThinkingLine("Release 1.5.0 at https://example.com/error/foo.ts stays plain"),
+		[{ kind: "plain", text: "Release 1.5.0 at https://example.com/error/foo.ts stays plain" }],
+	);
+
+	// All semantic categories: error, caution, verify, plan, hypothesis, tool.
+	assert.deepEqual(
+		tokenizeThinkingLine("Bug wait verify plan maybe bash Agent agent"),
+		[
+			{ kind: "error", text: "Bug" },
+			{ kind: "plain", text: " " },
+			{ kind: "caution", text: "wait" },
+			{ kind: "plain", text: " " },
+			{ kind: "verify", text: "verify" },
+			{ kind: "plain", text: " " },
+			{ kind: "plan", text: "plan" },
+			{ kind: "plain", text: " " },
+			{ kind: "hypothesis", text: "maybe" },
+			{ kind: "plain", text: " " },
+			{ kind: "tool", text: "bash" },
+			{ kind: "plain", text: " " },
+			{ kind: "tool", text: "Agent" },
+			{ kind: "plain", text: " agent" },
+		],
+	);
+
+	// ANSI passthrough: pre-styled divider returns a single plain token untouched.
+	const ansiDivider = "\x1b[2m──────────\x1b[22m";
+	assert.deepEqual(tokenizeThinkingLine(ansiDivider), [
+		{ kind: "plain", text: ansiDivider },
+	]);
+});
+
+test("styleThinkingLine maps each token kind through the palette", () => {
+	const palette: ThinkingPalette = {
+		plain: (t) => t,
+		heading: (t) => `<H:${t}>`,
+		code: (t) => `<C:${t}>`,
+		path: (t) => `<P:${t}>`,
+		tool: (t) => `<T:${t}>`,
+		error: (t) => `<E:${t}>`,
+		caution: (t) => `<W:${t}>`,
+		verify: (t) => `<V:${t}>`,
+		plan: (t) => `<PL:${t}>`,
+		hypothesis: (t) => `<HY:${t}>`,
+	};
+	assert.equal(
+		styleThinkingLine("**Goal**: wait, check `fn()` in helpers.ts via read (bug? maybe)", palette),
+		"<H:**Goal**>: <W:wait>, <V:check> <C:`fn()`> in <P:helpers.ts> via <T:read> (<E:bug>? <HY:maybe>)",
+	);
+});
+
+test("normalizeConfig handles thinkingHud with strict boolean default true", () => {
+	assert.equal(normalizeConfig({}).thinkingHud, true);
+	assert.equal(normalizeConfig({ thinkingHud: true }).thinkingHud, true);
+	assert.equal(normalizeConfig({ thinkingHud: false }).thinkingHud, false);
+	// Wrongly-typed values fall back to default true.
+	assert.equal(normalizeConfig({ thinkingHud: "false" as any }).thinkingHud, true);
+	assert.equal(normalizeConfig({ thinkingHud: 0 as any }).thinkingHud, true);
+	assert.equal(normalizeConfig({ thinkingHud: null as any }).thinkingHud, true);
+});
+
 
 

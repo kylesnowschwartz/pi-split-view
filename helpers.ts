@@ -500,6 +500,129 @@ export function isToolExpanded(
 	return entry.active || entry.isError;
 }
 
+export type ThinkingTokenKind =
+	| "plain"
+	| "heading"
+	| "code"
+	| "path"
+	| "tool"
+	| "error"
+	| "caution"
+	| "verify"
+	| "plan"
+	| "hypothesis";
+
+export interface ThinkingToken {
+	kind: ThinkingTokenKind;
+	text: string;
+}
+
+export type ThinkingPalette = Record<ThinkingTokenKind, (text: string) => string>;
+
+const THINKING_TOOL_NAMES = new Set<string>([
+	"bash",
+	"read",
+	"edit",
+	"write",
+	"grep",
+	"find",
+	"ls",
+	"Agent",
+	"codemode",
+	"ask_user",
+	"SendMessage",
+	"TaskOutput",
+	"TaskStop",
+]);
+
+const THINKING_PATH_EXT =
+	"ts|tsx|js|jsx|mjs|cjs|json|md|py|rb|go|rs|sh|yml|yaml|toml|css|html|sql|txt|jsonl";
+
+/**
+ * Single-pass left-to-right tokenizer regex for thinking lines.
+ * Capture groups correspond to priority order:
+ *  1: heading (**...**)
+ *  2: code (`...`)
+ *  3: URL passthrough (kept plain so URL substrings never match path/keywords)
+ *  4: path (explicit ~/ ./ ../ /dir/file, known extensions, or multi-segment/trailing-slash paths)
+ *  5: error
+ *  6: caution
+ *  7: verify
+ *  8: plan
+ *  9: hypothesis
+ * 10: tool (exact-case checked against THINKING_TOOL_NAMES)
+ */
+const THINKING_TOKEN_RE = new RegExp(
+	[
+		`(\\*\\*[^*\\n]+\\*\\*)`,
+		`(\`[^\`\\n]+\`)`,
+		`(https?:\\/\\/[^\\s)>"'\\]]+)`,
+		`((?<![:/\\.\\w-])(?:(?:~\\/|\\.\\.?\\/)[\\w.@-]+(?:\\/[\\w.@-]+)*\\/?|\\/[\\w.@-]+(?:\\/[\\w.@-]+)+\\/?|\\/[\\w.@-]+\\.(?:${THINKING_PATH_EXT})\\b|(?:[\\w.@-]+\\/)*[\\w.@-]+\\.(?:${THINKING_PATH_EXT})\\b|[\\w.@-]+(?:\\/[\\w.@-]+){2,}\\/?(?![\\w./-])|[\\w.@-]+(?:\\/[\\w.@-]+)*\\/(?![\\w./-])))`,
+		`(\\b(?:bug|bugs|error|errors|fail|fails|failed|failure|broken|crash|exception|wrong|invalid)\\b)`,
+		`(\\b(?:wait|actually|however|instead|careful|risk|blocker|caveat|warning|problem|issue|backtrack|missed|conflict|stuck)\\b)`,
+		`(\\b(?:verify|verified|verifying|confirm|confirmed|check|checked|checking|test|tests|testing|passed|passing|validate|validated|proven|evidence)\\b)`,
+		`(\\b(?:plan|planning|approach|strategy|decide|decided|decision|next|goal|step|steps|implement|refactor|design)\\b)`,
+		`(\\b(?:maybe|might|probably|possibly|assuming|assumption|hypothesis|unclear|unknown|wonder|suspect|likely)\\b)`,
+		`(\\b(?:bash|read|edit|write|grep|find|ls|Agent|codemode|ask_user|SendMessage|TaskOutput|TaskStop)\\b)`,
+	].join("|"),
+	"gi",
+);
+
+/**
+ * Tokenize a single line of Thinking text into non-overlapping semantic spans.
+ * Pre-styled lines containing ANSI CSI escapes (`\x1b[`) are returned untouched
+ * as a single `"plain"` token. Concatenating all token `.text` values is
+ * guaranteed to equal `line`.
+ */
+export function tokenizeThinkingLine(line: string): ThinkingToken[] {
+	if (line.includes("\x1b[")) return [{ kind: "plain", text: line }];
+	const tokens: ThinkingToken[] = [];
+	const push = (kind: ThinkingTokenKind, text: string) => {
+		if (!text) return;
+		const prev = tokens[tokens.length - 1];
+		if (kind === "plain" && prev?.kind === "plain") {
+			prev.text += text;
+		} else {
+			tokens.push({ kind, text });
+		}
+	};
+	let lastIndex = 0;
+	THINKING_TOKEN_RE.lastIndex = 0;
+	let m: RegExpExecArray | null;
+	while ((m = THINKING_TOKEN_RE.exec(line)) !== null) {
+		if (m.index > lastIndex) {
+			push("plain", line.slice(lastIndex, m.index));
+		}
+		const text = m[0];
+		let kind: ThinkingTokenKind = "plain";
+		if (m[1] !== undefined) kind = "heading";
+		else if (m[2] !== undefined) kind = "code";
+		else if (m[3] !== undefined) kind = "plain";
+		else if (m[4] !== undefined) kind = "path";
+		else if (m[5] !== undefined) kind = "error";
+		else if (m[6] !== undefined) kind = "caution";
+		else if (m[7] !== undefined) kind = "verify";
+		else if (m[8] !== undefined) kind = "plan";
+		else if (m[9] !== undefined) kind = "hypothesis";
+		else if (m[10] !== undefined) {
+			kind = THINKING_TOOL_NAMES.has(text) ? "tool" : "plain";
+		}
+		push(kind, text);
+		lastIndex = m.index + text.length;
+	}
+	if (lastIndex < line.length) {
+		push("plain", line.slice(lastIndex));
+	}
+	return tokens;
+}
+
+/** Apply `palette` functions to each semantic token of `line` and join. */
+export function styleThinkingLine(line: string, palette: ThinkingPalette): string {
+	return tokenizeThinkingLine(line)
+		.map((token) => palette[token.kind](token.text))
+		.join("");
+}
+
 export default function (_pi: ExtensionAPI) {
 	/* shared helper module, not a real extension */
 }

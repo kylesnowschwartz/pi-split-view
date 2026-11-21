@@ -135,6 +135,9 @@ export interface UiPanelsConfig {
 	/** Thinking panel buffer scope. Defaults to "session" (accumulate, the
 	 * pre-SV-27 behaviour) when absent. */
 	thinkingScope?: ThinkingScope;
+	/** Inline semantic keyword highlighting in the Thinking panel. Defaults to
+	 * true when absent. */
+	thinkingHud?: boolean;
 	/** Tools panel within the band. Defaults to true when absent. */
 	tools?: boolean;
 	/** Files side panel (fullscreen dock or regular overlay). */
@@ -188,6 +191,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 	answerDivider: "rule" | "space";
 	toolMode: ToolMode;
 	thinkingScope: ThinkingScope;
+	thinkingHud: boolean;
 	trimResponse: boolean;
 	responseSource: ResponseSource;
 	bandHeight: number;
@@ -294,6 +298,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		// SV-27: strict read — only the literal "turn" opts in; anything else
 		// falls back to the "session" default, preserving the original behaviour.
 		thinkingScope: root.thinkingScope === "turn" ? "turn" : "session",
+		thinkingHud: boolOr(root.thinkingHud, true),
 		trimResponse: boolOr(root.trimResponse, false),
 		// Strict read: only the literal "transcript" opts in.
 		responseSource: root.responseSource === "transcript" ? "transcript" : "messages",

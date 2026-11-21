@@ -152,9 +152,11 @@ import {
 	liveTailLines,
 	outputPreview,
 	stripLeadingTrailingBlankLines,
+	styleThinkingLine,
 	truncateInline,
 	thoughtsSinceLastUser,
 	type ImageBlock,
+	type ThinkingPalette,
 	type ToolExpandGlobal,
 } from "./helpers.ts";
 import { existsSync, statSync } from "node:fs";
@@ -234,6 +236,9 @@ let thinkingOn = true;
  * turn (default, the pre-SV-27 behaviour). Session-local;
  * /split-thinking-scope, persisted by /split-save. */
 let thinkingScope: ThinkingScope = "session";
+/** Inline semantic keyword highlighting in the Thinking panel. Session-local;
+ * /split-thinking-hud, persisted by /split-save. */
+let thinkingHudOn = true;
 let toolsOn = true;
 let filesOn = false;
 /** Files panel edit-diff subpanel (session-local; /split-diff, persisted by
@@ -259,6 +264,9 @@ let liveToolId: string | null = null;
  * entering / leaving live mode can jump to the end of the swapped content
  * instead of keeping a scroll offset that points into unrelated rows. */
 let toolsScroll: ScrollView | null = null;
+/** The thinking panel's RecentBody (band or zoomed; set on compose), so
+ * toggling /split-thinking-hud can invalidate its per-line wrap memo immediately. */
+let thinkingBody: RecentBody | null = null;
 /** Panel C: response-only view instead of pi's transcript (persisted). */
 let trimResponse = false;
 /** Top band height in rows (6–40, persisted; /split-height). */
@@ -2223,31 +2231,48 @@ interface BandDef {
 	windowed?: boolean;
 }
 
+function thinkingPalette(theme: Theme): ThinkingPalette {
+	return {
+		plain: (t) => theme.fg("thinkingText", t),
+		heading: (t) => theme.bold(theme.fg("accent", t)),
+		code: (t) => theme.fg("mdCode", t),
+		path: (t) => theme.fg("mdLink", t),
+		tool: (t) => theme.bold(theme.fg("toolTitle", t)),
+		error: (t) => theme.bold(theme.fg("error", t)),
+		caution: (t) => theme.fg("warning", t),
+		verify: (t) => theme.fg("success", t),
+		plan: (t) => theme.fg("accent", t),
+		hypothesis: (t) => theme.italic(theme.fg("syntaxType", t)),
+	};
+}
+
 function bandDef(theme: Theme, id: "thinking" | "tools"): BandDef {
-	return id === "thinking"
-		? {
-				title: "Thinking",
-				color: "accent",
-				streaming: () => thinking.streaming,
-				style: (l) => theme.fg("thinkingText", l),
-				lines: (w) => thinkingLines(theme, w),
-				version: () => thinking.version,
-				empty: "Thinking idle",
-				// SV-27: the thinking buffer is already capped at MAX_LINES, and a
-				// sliding newest-N window makes a fixed scrollTop resolve to
-				// different text on every streaming flush — scroll up and the panel
-				// keeps sliding under you. Emit the whole buffer instead.
-				windowed: false,
-			}
-		: {
-				title: "Tool Usage",
-				color: "muted",
-				streaming: () => toolOrder.some((id) => toolsBy.get(id)?.active),
-				style: (l) => l,
-				lines: (w) => toolItems(theme, w),
-				version: toolsVersion,
-				empty: "No tools called yet",
-			};
+	if (id === "thinking") {
+		const palette = thinkingPalette(theme);
+		return {
+			title: "Thinking",
+			color: "accent",
+			streaming: () => thinking.streaming,
+			style: (l) => (thinkingHudOn ? styleThinkingLine(l, palette) : theme.fg("thinkingText", l)),
+			lines: (w) => thinkingLines(theme, w),
+			version: () => thinking.version,
+			empty: "Thinking idle",
+			// SV-27: the thinking buffer is already capped at MAX_LINES, and a
+			// sliding newest-N window makes a fixed scrollTop resolve to
+			// different text on every streaming flush — scroll up and the panel
+			// keeps sliding under you. Emit the whole buffer instead.
+			windowed: false,
+		};
+	}
+	return {
+		title: "Tool Usage",
+		color: "muted",
+		streaming: () => toolOrder.some((id) => toolsBy.get(id)?.active),
+		style: (l) => l,
+		lines: (w) => toolItems(theme, w),
+		version: toolsVersion,
+		empty: "No tools called yet",
+	};
 }
 
 /**
@@ -2287,6 +2312,7 @@ function framedPanel(theme: Theme, d: BandDef, ctl: PanelCtl): Component {
 	});
 	ctl.scroll = scroll;
 	if (ctl.id === "tools") toolsScroll = scroll;
+	if (ctl.id === "thinking" && body instanceof RecentBody) thinkingBody = body;
 	return new MeasurementSafeVStack([
 		{ component: new BorderTop(theme, d.title, d.color, d.streaming, ctl), basis: 1, grow: 0, shrink: 0 },
 		{ component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 1 },
@@ -2675,6 +2701,7 @@ function composeLayout(theme: Theme, inner: Component): Component {
 	// Geometry refs belong to the tree being built; drop stale ones first.
 	for (const k of Object.keys(geo) as (keyof typeof geo)[]) delete geo[k];
 	toolsScroll = null;
+	thinkingBody = null;
 	composedTermCols = tuiRef?.terminal?.columns ?? 120;
 	if (zoomed && panelOn(zoomed)) {
 		const z = buildZoom(theme, zoomed);
@@ -2908,6 +2935,7 @@ export default function (pi: ExtensionAPI) {
 		layoutSlots = { ...cfg.slots };
 		syncFlagsFromSlots();
 		thinkingScope = cfg.thinkingScope;
+		thinkingHudOn = cfg.thinkingHud;
 		toolMode = cfg.toolMode;
 		toolExpandGlobal = toolMode === "full" ? "all" : null;
 		bandHeight = cfg.bandHeight;
@@ -3388,6 +3416,21 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("split-thinking-hud", {
+		description: "Toggle inline semantic keyword highlighting in the Thinking panel [on|off]",
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") return;
+			const arg = String(args ?? "").trim().toLowerCase();
+			if (arg === "on") thinkingHudOn = true;
+			else if (arg === "off") thinkingHudOn = false;
+			else thinkingHudOn = !thinkingHudOn;
+			thinking.version++;
+			thinkingBody?.invalidate();
+			if (anyPanelActive()) requestRender();
+			ctx.ui.notify(`Thinking HUD: ${thinkingHudOn ? "on" : "off"}`, "info");
+		},
+	});
+
 	pi.registerCommand("split-tools", {
 		description: "Toggle the tools panel within the band",
 		handler: async (_args, ctx) => {
@@ -3789,6 +3832,7 @@ export default function (pi: ExtensionAPI) {
 				toolMode,
 				trimResponse,
 				thinkingScope,
+				thinkingHud: thinkingHudOn,
 				bandHeight,
 				toolsWidthPct,
 				...(filesWidth === null ? {} : { filesWidth }),
