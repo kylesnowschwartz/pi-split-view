@@ -136,6 +136,13 @@ import {
 	type ThinkingHudPalette,
 } from "./thinking-hud.ts";
 import {
+	initToolHighlighter,
+	highlightBashCommand,
+	highlightCliOutputLine,
+	highlightCodeTreeSitter,
+	isLightTheme,
+} from "./tool-highlighter.ts";
+import {
 	getBaseRoot,
 	initLayoutManager,
 	setLayoutLayer,
@@ -182,7 +189,9 @@ const MAX_TAIL_CHARS = 16000;
 const MAX_FILES = 500;
 const MAX_WIDGET_NAMES = 3;
 const MIN_TERM_WIDTH = 90;
-const MAX_TOOL_OUTPUT_LINES = 20;
+const MAX_TOOL_OUTPUT_LINES = 80;
+/** Max lines rendered in an expanded rich bash/read/write card when not zoomed. */
+const MAX_EXPANDED_RICH_LINES = 40;
 /** Lines of an edit's unified diff kept per tool entry (zoomed tools view). */
 const MAX_TOOL_DIFF_LINES = 150;
 // OracleSpec body window: hard cap on FINAL VISUAL rows rendered by band
@@ -861,7 +870,10 @@ function setToolOutput(e: ToolEntry, text: string): void {
 	// SV-16: cap BEFORE splitting so the split never sees unbounded text.
 	const capped = capToolText(text);
 	const lines = capped.split(/\r?\n/);
-	e.output = lines.slice(-MAX_TOOL_OUTPUT_LINES).join("\n");
+	e.output =
+		e.name.toLowerCase() === "read"
+			? lines.slice(0, MAX_TOOL_OUTPUT_LINES).join("\n")
+			: lines.slice(-MAX_TOOL_OUTPUT_LINES).join("\n");
 	let nonBlank = 0;
 	for (const l of lines) if (l.trim()) nonBlank++;
 	e.outputLines = nonBlank;
@@ -1868,34 +1880,45 @@ class RichToolsBody implements Component {
 
 				if (!expanded) continue;
 
-				const comp = liveComps.get(entry.id);
-				if (comp && typeof comp.render === "function") {
-					const prevExpanded = Boolean((comp as any).expanded);
-					const canToggle = typeof comp.setExpanded === "function";
-					let rendered: string[] = [];
-					try {
-						if (!prevExpanded && canToggle) {
-							comp.setExpanded(true);
-						}
-						rendered = stripLeadingTrailingBlankLines(comp.render(innerWidth));
-					} catch {
-						rendered = [];
-					} finally {
-						if (!prevExpanded && canToggle) {
-							try {
-								comp.setExpanded(prevExpanded);
-							} catch {
-								/* ignore restore errors */
+				const lower = entry.name.toLowerCase();
+				if (lower === "bash") {
+					this.renderRichBashBody(entry, innerWidth, zoomedTools, emitLine);
+				} else if (
+					(lower === "read" || lower === "write") &&
+					!entry.image &&
+					this.renderRichCodeBody(entry, innerWidth, zoomedTools, emitLine)
+				) {
+					// Rendered with Tree-sitter / syntax highlighting.
+				} else {
+					const comp = liveComps.get(entry.id);
+					if (comp && typeof comp.render === "function") {
+						const prevExpanded = Boolean((comp as any).expanded);
+						const canToggle = typeof comp.setExpanded === "function";
+						let rendered: string[] = [];
+						try {
+							if (!prevExpanded && canToggle) {
+								comp.setExpanded(true);
+							}
+							rendered = stripLeadingTrailingBlankLines(comp.render(innerWidth));
+						} catch {
+							rendered = [];
+						} finally {
+							if (!prevExpanded && canToggle) {
+								try {
+									comp.setExpanded(prevExpanded);
+								} catch {
+									/* ignore restore errors */
+								}
 							}
 						}
-					}
-					if (rendered.length > 0) {
-						for (const line of rendered) emitLine(line);
+						if (rendered.length > 0) {
+							for (const line of rendered) emitLine(line);
+						} else {
+							this.renderFallbackBody(entry, innerWidth, width, zoomedTools, emitLine, rows);
+						}
 					} else {
 						this.renderFallbackBody(entry, innerWidth, width, zoomedTools, emitLine, rows);
 					}
-				} else {
-					this.renderFallbackBody(entry, innerWidth, width, zoomedTools, emitLine, rows);
 				}
 				// Visual separation after an expanded card.
 				rows.push(filler);
@@ -1933,7 +1956,167 @@ class RichToolsBody implements Component {
 		const prefix = `${caret} ${mark} ${name}${badge}${dur}`;
 		const room = innerWidth - visibleWidth(prefix) - 1;
 		const summary = room >= 4 ? formatToolArgSummary(e.name, e.args, room) : "";
-		return summary ? `${prefix} ${th.fg("muted", summary)}` : prefix;
+		if (!summary) return prefix;
+		if (e.name.toLowerCase() === "bash") {
+			const highlighted = highlightBashCommand(summary, th, isLightTheme(th));
+			const clipped =
+				visibleWidth(highlighted) > room
+					? truncateToWidth(highlighted, room)
+					: highlighted;
+			return `${prefix} ${clipped}`;
+		}
+		return `${prefix} ${th.fg("muted", summary)}`;
+	}
+
+	private renderRichBashBody(
+		entry: ToolEntry,
+		innerWidth: number,
+		zoomedTools: boolean,
+		emitLine: (content: string) => void,
+	): void {
+		const th = this.theme;
+		const isLight = isLightTheme(th);
+		const bodyWidth = Math.max(8, innerWidth - 2);
+		let cmd = "";
+		if (entry.args) {
+			try {
+				const parsed = JSON.parse(entry.args);
+				if (
+					parsed &&
+					typeof parsed === "object" &&
+					!Array.isArray(parsed) &&
+					typeof (parsed as Record<string, unknown>).command === "string"
+				) {
+					cmd = ((parsed as Record<string, unknown>).command as string).trim();
+				}
+			} catch {
+				/* ignore malformed args */
+			}
+		}
+
+		let emittedAny = false;
+		if (cmd) {
+			const cmdLines = cmd.split(/\r?\n/);
+			const promptPrefix = th.fg("accent", "$ ");
+			const cmdWidth = Math.max(8, bodyWidth - 2);
+			for (let i = 0; i < cmdLines.length; i++) {
+				const styled = highlightBashCommand(cmdLines[i]!, th, isLight);
+				const wrapped = wrapTextWithAnsi(styled, cmdWidth);
+				for (let j = 0; j < wrapped.length; j++) {
+					const lead = i === 0 && j === 0 ? promptPrefix : "  ";
+					emitLine(`  ${lead}${wrapped[j]!}`);
+				}
+			}
+			emittedAny = true;
+		}
+
+		const rawOut = (entry.liveText ?? entry.output ?? "").trimEnd();
+		if (rawOut) {
+			const allLines = rawOut.split(/\r?\n/);
+			const cap = zoomedTools ? allLines.length : MAX_EXPANDED_RICH_LINES;
+			const shown = allLines.slice(0, cap);
+			const hidden = Math.max(0, allLines.length - shown.length);
+			for (const raw of shown) {
+				const styled = highlightCliOutputLine(capDisplayLine(raw, MAX_LINE_CHARS), th);
+				for (const w of wrapTextWithAnsi(styled, bodyWidth)) {
+					emitLine(`  ${w}`);
+				}
+			}
+			if (hidden > 0) {
+				emitLine(th.fg("dim", `  +${hidden} more`));
+			}
+			emittedAny = true;
+		}
+
+		if (!emittedAny && entry.active) {
+			emitLine(th.fg("dim", "  …"));
+		}
+	}
+
+	private renderRichCodeBody(
+		entry: ToolEntry,
+		innerWidth: number,
+		zoomedTools: boolean,
+		emitLine: (content: string) => void,
+	): boolean {
+		const th = this.theme;
+		const isLight = isLightTheme(th);
+		const bodyWidth = Math.max(8, innerWidth - 2);
+		let parsed: Record<string, unknown> | null = null;
+		if (entry.args) {
+			try {
+				const raw = JSON.parse(entry.args);
+				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+					parsed = raw as Record<string, unknown>;
+				}
+			} catch {
+				parsed = null;
+			}
+		}
+
+		const filePath = typeof parsed?.path === "string" ? parsed.path : "";
+		const lower = entry.name.toLowerCase();
+		const code =
+			lower === "write"
+				? typeof parsed?.content === "string"
+					? parsed.content
+					: entry.output
+				: entry.output;
+
+		if (!filePath || !code) {
+			if (entry.active) {
+				emitLine(th.fg("dim", "  …"));
+				return true;
+			}
+			return false;
+		}
+
+		let highlighted = highlightCodeTreeSitter(code, filePath, isLight);
+		if (!highlighted) {
+			const lang = getLanguageFromPath(filePath);
+			if (lang) {
+				try {
+					highlighted = highlightCode(code, lang);
+				} catch {
+					highlighted = null;
+				}
+			}
+		}
+		const lines =
+			highlighted ?? code.split(/\r?\n/).map((l) => th.fg("toolOutput", l));
+		const cap = zoomedTools ? lines.length : MAX_EXPANDED_RICH_LINES;
+		const shown = lines.slice(0, cap);
+		const hidden = Math.max(0, lines.length - shown.length);
+
+		if (lower === "read") {
+			const offsetVal = parsed?.offset;
+			const startLine =
+				typeof offsetVal === "number" && Number.isFinite(offsetVal) && offsetVal >= 1
+					? Math.floor(offsetVal)
+					: 1;
+			const gutterWidth = String(startLine + Math.max(0, shown.length - 1)).length;
+			const codeWidth = Math.max(8, bodyWidth - gutterWidth - 1);
+			const blankGutter = " ".repeat(gutterWidth);
+			for (let i = 0; i < shown.length; i++) {
+				const num = th.fg("dim", String(startLine + i).padStart(gutterWidth));
+				const wrapped = wrapTextWithAnsi(shown[i]!, codeWidth);
+				emitLine(`  ${num} ${wrapped[0] ?? ""}`);
+				for (let j = 1; j < wrapped.length; j++) {
+					emitLine(`  ${blankGutter} ${wrapped[j]!}`);
+				}
+			}
+		} else {
+			for (const l of shown) {
+				for (const w of wrapTextWithAnsi(l, bodyWidth)) {
+					emitLine(`  ${w}`);
+				}
+			}
+		}
+
+		if (hidden > 0) {
+			emitLine(th.fg("dim", `  +${hidden} more`));
+		}
+		return true;
 	}
 
 	private renderFallbackBody(
@@ -1969,7 +2152,9 @@ class RichToolsBody implements Component {
 		) {
 			try {
 				const pretty = JSON.stringify(parsed, null, 2);
-				const argLines = highlightCode(pretty, "json");
+				const argLines =
+					highlightCodeTreeSitter(pretty, "json", isLightTheme(th)) ??
+					highlightCode(pretty, "json");
 				const shown = argLines.slice(0, MAX_FALLBACK_ARG_LINES);
 				for (const l of shown) emitLine(`  ${l}`);
 				if (argLines.length > MAX_FALLBACK_ARG_LINES) {
@@ -1992,6 +2177,7 @@ class RichToolsBody implements Component {
 		// 3. Syntax-highlighted output (if file path known for read/write), else toolOutput.
 		if (entry.output) {
 			const lower = entry.name.toLowerCase();
+			let filePath: string | undefined;
 			let lang: string | undefined;
 			if (
 				(lower === "read" || lower === "write") &&
@@ -2000,9 +2186,17 @@ class RichToolsBody implements Component {
 				!Array.isArray(parsed) &&
 				typeof (parsed as Record<string, unknown>).path === "string"
 			) {
-				lang = getLanguageFromPath((parsed as Record<string, unknown>).path as string);
+				filePath = (parsed as Record<string, unknown>).path as string;
+				lang = getLanguageFromPath(filePath);
 			}
-			if (lang) {
+			const tsHighlighted = filePath
+				? highlightCodeTreeSitter(entry.output, filePath, isLightTheme(th))
+				: null;
+			if (tsHighlighted) {
+				for (const hl of tsHighlighted) {
+					for (const w of wrapTextWithAnsi(hl, bodyWidth)) emitLine(`  ${w}`);
+				}
+			} else if (lang) {
 				try {
 					for (const hl of highlightCode(entry.output, lang)) {
 						for (const w of wrapTextWithAnsi(hl, bodyWidth)) emitLine(`  ${w}`);
@@ -2975,6 +3169,10 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (_e, ctx) => {
+		void initToolHighlighter(() => {
+			toolsVersionCounter++;
+			requestRender();
+		});
 		let cfg = normalizeConfig(loadUiPanelsConfig());
 		if (pi.getFlag("no-split")) {
 			// --no-split: start bare, ignoring the saved ui-panels.json defaults.
