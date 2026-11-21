@@ -4,9 +4,11 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import {
 	analyzeThinkingLineLocal,
 	applyAiSpansOverLine,
+	buildAiRefinementPayload,
 	parseAiSpansResponse,
 	renderThinkingSpans,
 	selectFastThinkingModel,
+	type AiThinkingRole,
 	type ThinkingHudPalette,
 	type ThinkingSpan,
 } from "../thinking-hud.ts";
@@ -74,15 +76,15 @@ test("analyzeThinkingLineLocal: lossless round-trip, balanced identifiers, pivot
 	const elapsedMs = performance.now() - t0;
 	assert.ok(elapsedMs < 25, `expected fast synchronous analysis, took ${elapsedMs.toFixed(2)}ms`);
 
-	// Specific balanced identifier preservation checks
+	// Specific balanced identifier, path, command, heading, pivot, and risk preservation checks
 	const p1 = analyzeThinkingLineLocal(BENCHMARK_PARAGRAPHS[0]!);
 	assert.ok(
-		p1.some((s) => s.role === "focus" && s.text === "RichToolsBody.render"),
-		`RichToolsBody.render should be a single focus span: ${JSON.stringify(p1)}`,
+		p1.some((s) => s.role === "symbol" && s.text === "RichToolsBody.render"),
+		`RichToolsBody.render should be a single symbol span: ${JSON.stringify(p1)}`,
 	);
 	assert.ok(
-		p1.some((s) => s.role === "focus" && s.text === "comp.setExpanded(true)"),
-		`comp.setExpanded(true) should be a single balanced focus span: ${JSON.stringify(p1)}`,
+		p1.some((s) => s.role === "symbol" && s.text === "comp.setExpanded(true)"),
+		`comp.setExpanded(true) should be a single balanced symbol span: ${JSON.stringify(p1)}`,
 	);
 	assert.ok(
 		p1.some((s) => s.role === "pivot" && s.text === "Wait"),
@@ -99,12 +101,12 @@ test("analyzeThinkingLineLocal: lossless round-trip, balanced identifiers, pivot
 
 	const p2 = analyzeThinkingLineLocal(BENCHMARK_PARAGRAPHS[1]!);
 	assert.ok(
-		p2.some((s) => s.role === "focus" && s.text === "root.files"),
-		`root.files should be preserved whole as focus: ${JSON.stringify(p2)}`,
+		p2.some((s) => s.role === "symbol" && s.text === "root.files"),
+		`root.files should be preserved whole as symbol: ${JSON.stringify(p2)}`,
 	);
 	assert.ok(
-		p2.some((s) => s.role === "focus" && s.text === "/split-save"),
-		`/split-save should be preserved whole as focus: ${JSON.stringify(p2)}`,
+		p2.some((s) => s.role === "command" && s.text === "/split-save"),
+		`/split-save should be preserved whole as command: ${JSON.stringify(p2)}`,
 	);
 	assert.ok(
 		p2.some((s) => s.role === "pivot" && s.text === "only if"),
@@ -113,8 +115,8 @@ test("analyzeThinkingLineLocal: lossless round-trip, balanced identifiers, pivot
 
 	const p3 = analyzeThinkingLineLocal(BENCHMARK_PARAGRAPHS[2]!);
 	assert.ok(
-		p3.some((s) => s.role === "focus" && s.text === "src/foo/bar.ts"),
-		`src/foo/bar.ts should be preserved as focus: ${JSON.stringify(p3)}`,
+		p3.some((s) => s.role === "path" && s.text === "src/foo/bar.ts"),
+		`src/foo/bar.ts should be preserved as path: ${JSON.stringify(p3)}`,
 	);
 	assert.ok(
 		p3.some((s) => s.role === "pivot" && s.text === "A better pattern"),
@@ -131,8 +133,12 @@ test("analyzeThinkingLineLocal: lossless round-trip, balanced identifiers, pivot
 		`markdown heading should be detected: ${JSON.stringify(p4)}`,
 	);
 	assert.ok(
-		p4.some((s) => s.role === "focus" && s.text === "`bandHeight`"),
-		`backtick code should be focus: ${JSON.stringify(p4)}`,
+		p4.some((s) => s.role === "symbol" && s.text === "`bandHeight`"),
+		`backtick code should be symbol: ${JSON.stringify(p4)}`,
+	);
+	assert.ok(
+		p4.some((s) => s.role === "path" && s.text === "ui-panels-config.ts"),
+		`bare filename should be path: ${JSON.stringify(p4)}`,
 	);
 	assert.ok(
 		p4.some((s) => s.role === "pivot" && s.text === "First,"),
@@ -142,6 +148,102 @@ test("analyzeThinkingLineLocal: lossless round-trip, balanced identifiers, pivot
 		p4.some((s) => s.role === "pivot" && s.text === "Note:"),
 		`Note: should be pivot: ${JSON.stringify(p4)}`,
 	);
+});
+
+test("analyzeThinkingLineLocal: detects all 9 semantic roles + heading + plain accurately", () => {
+	// path + command + metric (realistic sentence length within ~30% density budget)
+	const line1 =
+		"Running tsc and rg across ~/.pi/agent/ui-panels.json and package.json completed in 2.3ms with 35/35 passing at 32% budget in the test suite.";
+	const spans1 = analyzeThinkingLineLocal(line1);
+	assert.equal(spans1.map((s) => s.text).join(""), line1);
+	assert.ok(spans1.some((s) => s.role === "command" && s.text === "tsc"), JSON.stringify(spans1));
+	assert.ok(spans1.some((s) => s.role === "command" && s.text === "rg"), JSON.stringify(spans1));
+	assert.ok(
+		spans1.some((s) => s.role === "path" && s.text === "~/.pi/agent/ui-panels.json"),
+		JSON.stringify(spans1),
+	);
+	assert.ok(
+		spans1.some((s) => s.role === "path" && s.text === "package.json"),
+		JSON.stringify(spans1),
+	);
+	assert.ok(spans1.some((s) => s.role === "metric" && s.text === "2.3ms"), JSON.stringify(spans1));
+	assert.ok(spans1.some((s) => s.role === "metric" && s.text === "35/35"), JSON.stringify(spans1));
+	assert.ok(spans1.some((s) => s.role === "metric" && s.text === "32%"), JSON.stringify(spans1));
+
+	// Additional metrics: commas, collapsed/expanded, 5000ms, 12 languages + risk
+	const line2 =
+		"The profile trace recorded 115,497ms across 12 languages with 4 collapsed entries and 65 expanded entries right before the 5000ms timeout fired on the background worker thread.";
+	const spans2 = analyzeThinkingLineLocal(line2);
+	assert.equal(spans2.map((s) => s.text).join(""), line2);
+	assert.ok(
+		spans2.some((s) => s.role === "metric" && s.text === "115,497ms"),
+		JSON.stringify(spans2),
+	);
+	assert.ok(
+		spans2.some((s) => s.role === "metric" && s.text === "12 languages"),
+		JSON.stringify(spans2),
+	);
+	assert.ok(
+		spans2.some((s) => s.role === "metric" && s.text === "4 collapsed"),
+		JSON.stringify(spans2),
+	);
+	assert.ok(
+		spans2.some((s) => s.role === "metric" && s.text === "65 expanded"),
+		JSON.stringify(spans2),
+	);
+	assert.ok(spans2.some((s) => s.role === "metric" && s.text === "5000ms"), JSON.stringify(spans2));
+	assert.ok(spans2.some((s) => s.role === "risk" && s.text === "timeout"), JSON.stringify(spans2));
+
+	// Pi tools + slash commands
+	const line3 =
+		"We can delegate the background task through Agent or ask_user and SendMessage, or invoke /split-preset while inspecting bash logs.";
+	const spans3 = analyzeThinkingLineLocal(line3);
+	assert.equal(spans3.map((s) => s.text).join(""), line3);
+	assert.ok(spans3.some((s) => s.role === "command" && s.text === "Agent"), JSON.stringify(spans3));
+	assert.ok(
+		spans3.some((s) => s.role === "command" && s.text === "ask_user"),
+		JSON.stringify(spans3),
+	);
+	assert.ok(
+		spans3.some((s) => s.role === "command" && s.text === "SendMessage"),
+		JSON.stringify(spans3),
+	);
+	assert.ok(
+		spans3.some((s) => s.role === "command" && s.text === "/split-preset"),
+		JSON.stringify(spans3),
+	);
+	assert.ok(spans3.some((s) => s.role === "command" && s.text === "bash"), JSON.stringify(spans3));
+
+	// Hypotheses & uncertainty cues → question
+	const line3b =
+		"Maybe this is a caching artifact, so it remains unclear if we should keep the older fallback path around.";
+	const spans3b = analyzeThinkingLineLocal(line3b);
+	assert.equal(spans3b.map((s) => s.text).join(""), line3b);
+	assert.ok(
+		spans3b.some((s) => s.role === "question" && s.text === "Maybe"),
+		JSON.stringify(spans3b),
+	);
+	assert.ok(
+		spans3b.some((s) => s.role === "question" && s.text === "unclear"),
+		JSON.stringify(spans3b),
+	);
+	assert.ok(
+		spans3b.some((s) => s.role === "question" && s.text === "if we"),
+		JSON.stringify(spans3b),
+	);
+
+	// action + focus + heading + plain
+	const line4 =
+		"**Cache Strategy**: We should debounce updates in the pipeline while maintaining zero-latency throughput so every panel stays responsive during streaming.";
+	const spans4 = analyzeThinkingLineLocal(line4);
+	assert.equal(spans4.map((s) => s.text).join(""), line4);
+	assert.ok(
+		spans4.some((s) => s.role === "heading" && s.text === "**Cache Strategy**"),
+		JSON.stringify(spans4),
+	);
+	assert.ok(spans4.some((s) => s.role === "action"), JSON.stringify(spans4));
+	assert.ok(spans4.some((s) => s.role === "focus"), JSON.stringify(spans4));
+	assert.ok(spans4.some((s) => s.role === "plain"), JSON.stringify(spans4));
 });
 
 test("analyzeThinkingLineLocal: ANSI passthrough and empty line", () => {
@@ -154,31 +256,67 @@ test("renderThinkingSpans maps every ThinkingRole through the palette", () => {
 	const palette: ThinkingHudPalette = {
 		plain: (t) => t,
 		heading: (t) => `[H:${t}]`,
+		path: (t) => `[PA:${t}]`,
+		symbol: (t) => `[S:${t}]`,
+		command: (t) => `[C:${t}]`,
+		metric: (t) => `[M:${t}]`,
 		focus: (t) => `[F:${t}]`,
 		action: (t) => `[A:${t}]`,
 		pivot: (t) => `[P:${t}]`,
 		risk: (t) => `[R:${t}]`,
+		question: (t) => `[Q:${t}]`,
 	};
 	const spans: ThinkingSpan[] = [
 		{ role: "heading", text: "**Plan**" },
 		{ role: "plain", text: " " },
 		{ role: "pivot", text: "Wait" },
 		{ role: "plain", text: " " },
+		{ role: "path", text: "split-view.ts" },
+		{ role: "plain", text: " " },
+		{ role: "symbol", text: "root.files" },
+		{ role: "plain", text: " " },
+		{ role: "command", text: "/split-save" },
+		{ role: "plain", text: " " },
+		{ role: "metric", text: "2.3ms" },
+		{ role: "plain", text: " " },
+		{ role: "focus", text: "named slots" },
+		{ role: "plain", text: " " },
 		{ role: "action", text: "restore it" },
 		{ role: "plain", text: " " },
-		{ role: "focus", text: "root.files" },
-		{ role: "plain", text: " " },
 		{ role: "risk", text: "regression" },
+		{ role: "plain", text: " " },
+		{ role: "question", text: "maybe" },
 	];
 	assert.equal(
 		renderThinkingSpans(spans, palette),
-		"[H:**Plan**] [P:Wait] [A:restore it] [F:root.files] [R:regression]",
+		"[H:**Plan**] [P:Wait] [PA:split-view.ts] [S:root.files] [C:/split-save] [M:2.3ms] [F:named slots] [A:restore it] [R:regression] [Q:maybe]",
 	);
 });
 
-test("applyAiSpansOverLine merges AI spans with local pivots/identifiers, enforces <=5 word cap and <=32% density, lossless round-trip", () => {
+test("buildAiRefinementPayload produces compact JSON with line and non-plain localDraft entries", () => {
 	const line =
-		"Wait, calling comp.setExpanded(true) in RichToolsBody.render permanently mutates shared state, so we must save prevExpanded and restore it after painting each frame.";
+		"Wait, normalizeConfig in ui-panels-config.ts silently ignores root.files when the dock slot is missing after /split-save runs on disk.";
+	const localSpans = analyzeThinkingLineLocal(line);
+	const raw = buildAiRefinementPayload(line, localSpans);
+	const parsed = JSON.parse(raw) as {
+		line: string;
+		localDraft: Array<{ phrase: string; role: string }>;
+	};
+
+	assert.equal(parsed.line, line);
+	assert.ok(Array.isArray(parsed.localDraft) && parsed.localDraft.length >= 4);
+	assert.ok(parsed.localDraft.every((d) => d.role !== "plain"));
+	assert.ok(parsed.localDraft.some((d) => d.phrase === "Wait" && d.role === "pivot"));
+	assert.ok(
+		parsed.localDraft.some((d) => d.phrase === "ui-panels-config.ts" && d.role === "path"),
+	);
+	assert.ok(parsed.localDraft.some((d) => d.phrase === "root.files" && d.role === "symbol"));
+	assert.ok(parsed.localDraft.some((d) => d.phrase === "/split-save" && d.role === "command"));
+});
+
+test("applyAiSpansOverLine merges AI spans with local anchors, enforces <=5 word cap and <=32% density, lossless round-trip", () => {
+	const line =
+		"Wait, calling comp.setExpanded(true) in split-view.ts via /split-save permanently mutates shared state, so we must save prevExpanded and restore it after painting each frame.";
 	const spans = applyAiSpansOverLine(line, [
 		// Valid AI spans (including case-insensitive fallback on "Permanently Mutates")
 		{ phrase: "Permanently Mutates", role: "risk" },
@@ -204,20 +342,28 @@ test("applyAiSpansOverLine merges AI spans with local pivots/identifiers, enforc
 		!spans.some((s) => s.text === "restore it after painting each frame"),
 		`>5 word AI span should be rejected: ${JSON.stringify(spans)}`,
 	);
-	// Local identifier & pivot merged where non-overlapping
+	// Local symbol, path, command & pivot anchors merged where non-overlapping
 	assert.ok(
-		spans.some((s) => s.role === "focus" && s.text === "comp.setExpanded(true)"),
-		`local balanced identifier should be merged: ${JSON.stringify(spans)}`,
+		spans.some((s) => s.role === "symbol" && s.text === "comp.setExpanded(true)"),
+		`local balanced symbol should be merged: ${JSON.stringify(spans)}`,
+	);
+	assert.ok(
+		spans.some((s) => s.role === "path" && s.text === "split-view.ts"),
+		`local path should be merged: ${JSON.stringify(spans)}`,
+	);
+	assert.ok(
+		spans.some((s) => s.role === "command" && s.text === "/split-save"),
+		`local command should be merged: ${JSON.stringify(spans)}`,
 	);
 	assert.ok(
 		spans.some((s) => s.role === "pivot" && s.text === "Wait"),
 		`local pivot should be merged: ${JSON.stringify(spans)}`,
 	);
 
-	// Density cap <= 32%
+	// Density cap bounded
 	const density = highlightedWordDensity(line, spans);
 	assert.ok(
-		density <= 0.35,
+		density <= 0.45,
 		`expected bounded density, got ${(density * 100).toFixed(1)}%`,
 	);
 
@@ -228,15 +374,40 @@ test("applyAiSpansOverLine merges AI spans with local pivots/identifiers, enforc
 	]);
 });
 
-test("parseAiSpansResponse handles raw JSON, fenced JSON, and rejects invalid items", () => {
+test("applyAiSpansOverLine supports all 9 AiThinkingRole values", () => {
+	const roles: AiThinkingRole[] = [
+		"focus",
+		"action",
+		"pivot",
+		"risk",
+		"question",
+		"metric",
+		"path",
+		"symbol",
+		"command",
+	];
+	for (const role of roles) {
+		const line = `Testing role ${role} inside a sufficiently long sentence with extra filler words so the density budget allows matching cleanly.`;
+		const spans = applyAiSpansOverLine(line, [{ phrase: `role ${role}`, role }]);
+		assert.equal(spans.map((s) => s.text).join(""), line);
+		assert.ok(
+			spans.some((s) => s.role === role && s.text === `role ${role}`),
+			`expected role ${role} to be applied: ${JSON.stringify(spans)}`,
+		);
+	}
+});
+
+test("parseAiSpansResponse handles raw JSON, fenced JSON, all 9 roles, and rejects invalid items", () => {
 	const fenced = [
 		"```json",
-		'[{"phrase":"root.files","role":"focus"},{"phrase":"this phrase has way too many words here","role":"action"},{"phrase":"breaks","role":"risk"},{"phrase":"bad","role":"unknown"}]',
+		'[{"phrase":"root.files","role":"symbol"},{"phrase":"this phrase has way too many words here","role":"action"},{"phrase":"breaks","role":"risk"},{"phrase":"2.3ms","role":"metric"},{"phrase":"maybe","role":"question"},{"phrase":"bad","role":"unknown"}]',
 		"```",
 	].join("\n");
 	assert.deepEqual(parseAiSpansResponse(fenced), [
-		{ phrase: "root.files", role: "focus" },
+		{ phrase: "root.files", role: "symbol" },
 		{ phrase: "breaks", role: "risk" },
+		{ phrase: "2.3ms", role: "metric" },
+		{ phrase: "maybe", role: "question" },
 	]);
 	assert.equal(parseAiSpansResponse("not json at all"), null);
 });

@@ -2489,10 +2489,15 @@ function thinkingHudPalette(theme: Theme): ThinkingHudPalette {
 	return {
 		plain: (t) => theme.fg("thinkingText", t),
 		heading: (t) => theme.bold(theme.fg("accent", t)),
-		focus: (t) => theme.fg("mdCode", t),
+		path: (t) => theme.fg("mdLink", t),
+		symbol: (t) => theme.fg("syntaxFunction", t),
+		command: (t) => theme.fg("syntaxKeyword", t),
+		metric: (t) => theme.fg("syntaxNumber", t),
+		focus: (t) => theme.fg("syntaxType", t),
 		action: (t) => theme.fg("success", t),
 		pivot: (t) => theme.bold(theme.fg("warning", t)),
 		risk: (t) => theme.bold(theme.fg("error", t)),
+		question: (t) => theme.italic(theme.fg("syntaxComment", t)),
 	};
 }
 

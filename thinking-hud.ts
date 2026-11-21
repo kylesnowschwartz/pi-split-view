@@ -15,7 +15,18 @@ import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export type ThinkingRole = "plain" | "heading" | "focus" | "action" | "pivot" | "risk";
+export type ThinkingRole =
+	| "plain"
+	| "heading"
+	| "path"
+	| "symbol"
+	| "command"
+	| "metric"
+	| "focus"
+	| "action"
+	| "pivot"
+	| "risk"
+	| "question";
 
 export interface ThinkingSpan {
 	role: ThinkingRole;
@@ -24,7 +35,16 @@ export interface ThinkingSpan {
 
 export type ThinkingHudPalette = Record<ThinkingRole, (text: string) => string>;
 
-export type AiThinkingRole = "focus" | "action" | "pivot" | "risk";
+export type AiThinkingRole =
+	| "focus"
+	| "action"
+	| "pivot"
+	| "risk"
+	| "question"
+	| "metric"
+	| "path"
+	| "symbol"
+	| "command";
 
 export interface AiThinkingSpan {
 	phrase: string;
@@ -37,7 +57,17 @@ interface ClaimedRange {
 	role: ThinkingRole;
 }
 
-const VALID_AI_ROLES = new Set<string>(["focus", "action", "pivot", "risk"]);
+const VALID_AI_ROLES = new Set<string>([
+	"focus",
+	"action",
+	"pivot",
+	"risk",
+	"question",
+	"metric",
+	"path",
+	"symbol",
+	"command",
+]);
 
 const STOPWORDS = new Set<string>([
 	"a", "an", "the", "and", "or", "but", "if", "so", "as", "at", "by", "for",
@@ -103,11 +133,13 @@ const URL_RE = /https?:\/\/[^\s)>"'`]+/g;
 const HEADING_RE = /\*\*[^*\n]+?\*\*/g;
 const BACKTICK_RE = /`[^`\n]+`/g;
 
-// Balanced dotted chains, calls, slash-commands, paths, filenames, and technical identifiers.
+// Balanced dotted chains, calls, slash-commands, CLI/Pi tools, paths, filenames, technical identifiers, and metrics.
 const DOTTED_OR_CALL_RE =
 	/(?<![A-Za-z0-9_./~-])(?:[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+|[A-Za-z_$][A-Za-z0-9_$]*(?=\())/g;
 const SLASH_CMD_RE =
 	/(?<![A-Za-z0-9_./~:-])\/[a-z][a-z0-9-]{1,32}(?![A-Za-z0-9_/-]|\.[A-Za-z0-9])/g;
+const TOOL_CMD_RE =
+	/(?<![A-Za-z0-9_./~-])(?:bash|read|edit|write|grep|find|ls|rg|tsc|git|npm|Agent|codemode|ask_user|SendMessage)(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_]|\()/g;
 // Linear-time path matcher (no nested overlapping quantifiers).
 const PATH_RE =
 	/(?<![A-Za-z0-9_:@/-])(?:~\/|\.\.?\/|\/[A-Za-z0-9_.-]+\/|[A-Za-z0-9_.-]+\/)[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\/?(?![A-Za-z0-9_./-])/g;
@@ -115,6 +147,9 @@ const BARE_FILE_RE =
 	/(?<![A-Za-z0-9_./~-])[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|yml|yaml|toml|sh|css|html|py|go|rs|sql|txt)(?![A-Za-z0-9_.-])/g;
 const TECH_IDENT_RE =
 	/(?<![A-Za-z0-9_./~-])(?:[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*|[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+)(?![A-Za-z0-9_])/g;
+// Linear-time quantitative metrics: timings, ratios, percentages, and number+unit counts.
+const METRIC_RE =
+	/(?<![A-Za-z0-9_./~-])\d+(?:,\d{3})*(?:\.\d+)?(?:\/\d+(?:,\d{3})*(?:\.\d+)?|%|(?:ms|us|µs|ns|s|m|h|fps|hz|khz|mhz|ghz|kb|mb|gb|tb|b|px|em|rem|ch|cols|rows|k|M|x)\b|\s+(?:ms|seconds?|sec|minutes?|min|hours?|hrs?|days?|bytes?|lines?|files?|words?|tokens?|spans?|items?|tests?|passes?|failures?|errors?|warnings?|roles?|panels?|slots?|tabs?|columns?|cols|rows|chars?|characters?|entries?|chunks?|blocks?|languages?|collapsed|expanded|active|pending|queued|cached|remaining|hidden|matched|skipped|passed|failed)\b)(?![A-Za-z0-9_./-])/gi;
 
 // Discourse pivot cues (multi-word before single-word).
 const PIVOT_RE =
@@ -126,6 +161,10 @@ const RISK_MULTI_RE =
 
 const RISK_SINGLE_RE =
 	/\b(?:(?:permanently|silently|never|accidentally)\s+)?(?:regression|regressions|ignores|ignored|breaks|broken|fails|failed|failure|bug|bugs|error|errors|conflict|conflicts|stuck|blocker|blockers|missing|crash|crashes|corrupts|corrupted|overflow|timeout|deadlock|clobbers|clobbering|leaks|mutates)\b/gi;
+
+// Hypotheses, speculation, and uncertainty cues.
+const QUESTION_RE =
+	/\b(?:if we|not sure|might be|could be|may be|maybe|might|probably|possibly|assuming|hypothesis|hypothesize|unclear|unknown|whether|wonder|wondering|suspect|suspecting|likely|unlikely|presumably|perhaps|unsure)(?![A-Za-z0-9_])/gi;
 
 function countWords(text: string): number {
 	const trimmed = text.trim();
@@ -196,11 +235,11 @@ function claimBackticks(line: string, mask: Uint8Array, ranges: ClaimedRange[]):
 	BACKTICK_RE.lastIndex = 0;
 	let m: RegExpExecArray | null;
 	while ((m = BACKTICK_RE.exec(line)) !== null) {
-		claimRange(mask, ranges, m.index, m.index + m[0].length, "focus");
+		claimRange(mask, ranges, m.index, m.index + m[0].length, "symbol");
 	}
 }
 
-function claimIdentifiersAndPaths(
+function claimPaths(
 	line: string,
 	mask: Uint8Array,
 	ranges: ClaimedRange[],
@@ -212,7 +251,7 @@ function claimIdentifiersAndPaths(
 		if (maxWords !== undefined && usedWordsRef && usedWordsRef.count + w > maxWords) {
 			return;
 		}
-		if (claimRange(mask, ranges, start, end, "focus") && usedWordsRef) {
+		if (claimRange(mask, ranges, start, end, "path") && usedWordsRef) {
 			usedWordsRef.count += w;
 		}
 	};
@@ -221,6 +260,8 @@ function claimIdentifiersAndPaths(
 	PATH_RE.lastIndex = 0;
 	let m: RegExpExecArray | null;
 	while ((m = PATH_RE.exec(line)) !== null) {
+		// Never treat pure numeric ratios like 35/35 as file paths.
+		if (/^\d+(?:\/\d+)+$/.test(m[0])) continue;
 		tryClaim(m.index, m.index + m[0].length);
 	}
 
@@ -229,16 +270,62 @@ function claimIdentifiersAndPaths(
 	while ((m = BARE_FILE_RE.exec(line)) !== null) {
 		tryClaim(m.index, m.index + m[0].length);
 	}
+}
 
-	// 3. Slash commands (e.g. /split-save, /split-thinking-hud)
+function claimCommands(
+	line: string,
+	mask: Uint8Array,
+	ranges: ClaimedRange[],
+	maxToolWords?: number,
+	usedWordsRef?: { count: number },
+): void {
+	// 1. Slash commands (e.g. /split-save, /split-thinking-hud)
 	SLASH_CMD_RE.lastIndex = 0;
+	let m: RegExpExecArray | null;
 	while ((m = SLASH_CMD_RE.exec(line)) !== null) {
-		tryClaim(m.index, m.index + m[0].length);
+		const start = m.index;
+		const end = start + m[0].length;
+		if (claimRange(mask, ranges, start, end, "command") && usedWordsRef) {
+			usedWordsRef.count += countWords(m[0]);
+		}
 	}
 
-	// 4. Dotted expressions & call expressions with balanced parens
+	// 2. Standalone Pi/CLI tool names (e.g. bash, rg, tsc, git, Agent, ask_user)
+	TOOL_CMD_RE.lastIndex = 0;
+	while ((m = TOOL_CMD_RE.exec(line)) !== null) {
+		const start = m.index;
+		const end = start + m[0].length;
+		const w = countWords(m[0]);
+		if (maxToolWords !== undefined && usedWordsRef && usedWordsRef.count + w > maxToolWords) {
+			continue;
+		}
+		if (claimRange(mask, ranges, start, end, "command") && usedWordsRef) {
+			usedWordsRef.count += w;
+		}
+	}
+}
+
+function claimSymbols(
+	line: string,
+	mask: Uint8Array,
+	ranges: ClaimedRange[],
+	maxWords?: number,
+	usedWordsRef?: { count: number },
+): void {
+	const tryClaim = (start: number, end: number) => {
+		const w = countWords(line.slice(start, end));
+		if (maxWords !== undefined && usedWordsRef && usedWordsRef.count + w > maxWords) {
+			return;
+		}
+		if (claimRange(mask, ranges, start, end, "symbol") && usedWordsRef) {
+			usedWordsRef.count += w;
+		}
+	};
+
+	// 1. Dotted expressions & call expressions with balanced parens
 	//    (e.g. RichToolsBody.render, comp.setExpanded(true), root.files)
 	DOTTED_OR_CALL_RE.lastIndex = 0;
+	let m: RegExpExecArray | null;
 	while ((m = DOTTED_OR_CALL_RE.exec(line)) !== null) {
 		const start = m.index;
 		let end = start + m[0].length;
@@ -261,10 +348,32 @@ function claimIdentifiersAndPaths(
 		tryClaim(start, end);
 	}
 
-	// 5. camelCase / PascalCase / snake_case identifiers
+	// 2. camelCase / PascalCase / snake_case identifiers
 	TECH_IDENT_RE.lastIndex = 0;
 	while ((m = TECH_IDENT_RE.exec(line)) !== null) {
 		tryClaim(m.index, m.index + m[0].length);
+	}
+}
+
+function claimMetrics(
+	line: string,
+	mask: Uint8Array,
+	ranges: ClaimedRange[],
+	maxWords?: number,
+	usedWordsRef?: { count: number },
+): void {
+	METRIC_RE.lastIndex = 0;
+	let m: RegExpExecArray | null;
+	while ((m = METRIC_RE.exec(line)) !== null) {
+		const start = m.index;
+		const end = start + m[0].length;
+		const w = countWords(m[0]);
+		if (maxWords !== undefined && usedWordsRef && usedWordsRef.count + w > maxWords) {
+			continue;
+		}
+		if (claimRange(mask, ranges, start, end, "metric") && usedWordsRef) {
+			usedWordsRef.count += w;
+		}
 	}
 }
 
@@ -308,6 +417,26 @@ function claimRisks(
 			if (claimRange(mask, ranges, start, end, "risk")) {
 				usedWordsRef.count += w;
 			}
+		}
+	}
+}
+
+function claimQuestions(
+	line: string,
+	mask: Uint8Array,
+	ranges: ClaimedRange[],
+	maxWords: number,
+	usedWordsRef: { count: number },
+): void {
+	QUESTION_RE.lastIndex = 0;
+	let m: RegExpExecArray | null;
+	while ((m = QUESTION_RE.exec(line)) !== null) {
+		const start = m.index;
+		const end = start + m[0].length;
+		const w = countWords(m[0]);
+		if (usedWordsRef.count + w > maxWords) continue;
+		if (claimRange(mask, ranges, start, end, "question")) {
+			usedWordsRef.count += w;
 		}
 	}
 }
@@ -519,23 +648,47 @@ export function analyzeThinkingLineLocal(line: string): ThinkingSpan[] {
 
 	// Priority 1: Markdown headings (**...**)
 	claimHeadings(line, mask, ranges);
-	// Priority 2: Inline backtick code (`...`)
+	// Priority 2: Inline backtick code (`...`) → symbol
 	claimBackticks(line, mask, ranges);
 
 	const usedWords = {
 		count: ranges.reduce((sum, r) => sum + countWords(line.slice(r.start, r.end)), 0),
 	};
 
-	// Priority 3: Balanced whole identifiers, calls, slash-commands & paths
-	claimIdentifiersAndPaths(line, mask, ranges, undefined, usedWords);
-	// Priority 4: Discourse pivots
+	// Priority 3: File paths & bare filenames → path
+	claimPaths(line, mask, ranges, undefined, usedWords);
+	// Priority 4: Slash commands & standalone Pi/CLI tool names → command
+	claimCommands(line, mask, ranges, maxHardBudget, usedWords);
+	// Priority 5: Balanced dotted/call expressions & technical identifiers → symbol
+	claimSymbols(line, mask, ranges, undefined, usedWords);
+	// Priority 6: Quantitative metrics (timings, ratios, percentages, counts) → metric
+	claimMetrics(line, mask, ranges, maxHardBudget, usedWords);
+	// Priority 7: Discourse pivots → pivot
 	claimPivots(line, mask, ranges, maxHardBudget, usedWords);
-	// Priority 5: Risk / failure / cost phrases
+	// Priority 8: Risk / failure / cost phrases → risk
 	claimRisks(line, mask, ranges, maxHardBudget, usedWords);
-	// Priority 6: Self-information / novelty phrase chunks & action verb+object pairs
+	// Priority 9: Hypotheses & uncertainty cues → question
+	claimQuestions(line, mask, ranges, maxHardBudget, usedWords);
+	// Priority 10: Self-information / novelty phrase chunks & action verb+object pairs → focus / action
 	claimSalienceChunks(line, mask, ranges, maxSalienceBudget, usedWords);
 
 	return buildLosslessSpans(line, ranges);
+}
+
+/**
+ * Serialize a structured Tier 1 → Tier 2 refinement payload so the fast AI
+ * refines local anchors rather than starting from scratch.
+ */
+export function buildAiRefinementPayload(
+	line: string,
+	localSpans: readonly ThinkingSpan[],
+): string {
+	return JSON.stringify({
+		line,
+		localDraft: localSpans
+			.filter((s) => s.role !== "plain")
+			.map((s) => ({ phrase: s.text, role: s.role })),
+	});
 }
 
 /** Render spans through a role-to-styler palette. */
@@ -635,9 +788,11 @@ export function applyAiSpansOverLine(
 		return analyzeThinkingLineLocal(line);
 	}
 
-	// 3. Merge in non-overlapping local backtick code, balanced identifiers/paths, and pivots.
+	// 3. Merge in non-overlapping local deterministic anchors (path, command, symbol, pivot).
 	claimBackticks(line, mask, ranges);
-	claimIdentifiersAndPaths(line, mask, ranges);
+	claimPaths(line, mask, ranges);
+	claimCommands(line, mask, ranges);
+	claimSymbols(line, mask, ranges);
 	claimPivots(line, mask, ranges);
 
 	return buildLosslessSpans(line, ranges);
@@ -664,12 +819,15 @@ export function selectFastThinkingModel(models: readonly Model<Api>[]): Model<Ap
 }
 
 const AI_REFINER_SYSTEM_PROMPT = [
-	"Extract 2 to 5 concise semantic highlight spans from the given coding-agent reasoning line.",
-	'Return ONLY a compact JSON array: [{"phrase":"...","role":"focus|action|pivot|risk"}]',
-	"Rules:",
-	"- Every phrase MUST be an exact verbatim substring of the input text.",
-	"- Each phrase MUST be 1 to 5 words; total highlighted words MUST be <= 30% of the input.",
-	"- Roles: focus (core subject/symbol/concept), action (intended step/fix), pivot (reasoning turn/contrast), risk (bug/failure/cost).",
+	"You refine semantic highlight spans for a coding-agent reasoning line.",
+	'Input is JSON: {"line":"...","localDraft":[{"phrase":"...","role":"..."}]}.',
+	'Return ONLY a compact JSON array: [{"phrase":"...","role":"focus|action|pivot|risk|question|metric|path|symbol|command"}]',
+	"Refinement rules:",
+	"- Keep accurate path, symbol, command, metric, and pivot anchors from localDraft.",
+	"- Merge fragmented local words into crisp 2 to 5 word clause spans for focus, action, risk, and question.",
+	"- Fix misclassified roles and drop noisy filler spans.",
+	"- Every phrase MUST be an exact verbatim substring of line, 1 to 5 words; return 2 to 6 spans covering <= 30% of words.",
+	"- Roles: focus (core concept/subject), action (intended step/fix), pivot (reasoning turn/contrast), risk (bug/failure/blocker/cost), question (hypothesis/uncertainty), metric (count/timing/percent/ratio), path (file path/filename), symbol (identifier/call/code), command (slash command/CLI/tool).",
 	"- Output raw JSON array only. No explanation, no markdown code fences.",
 ].join("\n");
 
@@ -724,6 +882,7 @@ const MIN_AI_LINE_LENGTH = 45;
 
 interface QueuedRefineJob {
 	key: string;
+	payload: string;
 	ctx: ExtensionContext;
 	onRefined: () => void;
 }
@@ -765,22 +924,30 @@ export class ThinkingAiRefiner {
 		return hit;
 	}
 
-	enqueue(line: string, ctx: ExtensionContext | null | undefined, onRefined: () => void): void {
+	enqueue(
+		line: string,
+		ctx: ExtensionContext | null | undefined,
+		onRefined: () => void,
+		localSpans?: readonly ThinkingSpan[],
+	): void {
 		if (!ctx || !ctx.modelRegistry) return;
 		if (line.includes("\x1b[")) return;
 		const key = this.normalizeKey(line);
 		if (key.length < MIN_AI_LINE_LENGTH) return;
 		if (this.cache.has(key) || this.inFlight.has(key) || this.queuedKeys.has(key)) return;
 
+		const resolvedLocalSpans = localSpans ?? analyzeThinkingLineLocal(key);
+		const payload = buildAiRefinementPayload(key, resolvedLocalSpans);
+
 		if (this.activeCount < MAX_CONCURRENCY) {
-			this.startJob({ key, ctx, onRefined });
+			this.startJob({ key, payload, ctx, onRefined });
 		} else {
 			if (this.queue.length >= MAX_PENDING_QUEUE) {
 				const dropped = this.queue.shift();
 				if (dropped) this.queuedKeys.delete(dropped.key);
 			}
 			this.queuedKeys.add(key);
-			this.queue.push({ key, ctx, onRefined });
+			this.queue.push({ key, payload, ctx, onRefined });
 		}
 	}
 
@@ -858,7 +1025,7 @@ export class ThinkingAiRefiner {
 					messages: [
 						{
 							role: "user",
-							content: job.key,
+							content: job.payload,
 							timestamp: Date.now(),
 						},
 					],
