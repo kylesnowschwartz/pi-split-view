@@ -115,6 +115,12 @@ import {
 	loadUiPanelsConfig,
 	saveUiPanelsConfig,
 	normalizeConfig,
+	assignSlot,
+	LAYOUT_PRESETS,
+	type LayoutSlots,
+	type PresetName,
+	type SlotName,
+	type SlotPanel,
 	type ToolMode as ToolModeCfg,
 	type ThinkingScope,
 	type ResponseSource,
@@ -256,10 +262,41 @@ let toolsWidthPct = 35;
 /** Files dock width in cols set by dragging its edge (null = auto 25%,
  * 34–48). Session-local; persisted by /split-save as filesWidth. */
 let filesWidth: number | null = null;
+/** Named layout slot assignments (topLeft, topRight, main, dock). */
+let layoutSlots: LayoutSlots = {
+	topLeft: null,
+	topRight: null,
+	main: "messages",
+	dock: null,
+};
 /** Panel expanded to the whole area above the editor (header ↗ button).
  * Transient: never persisted. */
-type PanelId = "thinking" | "tools" | "files";
+type PanelId = "thinking" | "tools" | "files" | "messages";
 let zoomed: PanelId | null = null;
+
+const SLOT_NAMES: readonly SlotName[] = ["topLeft", "topRight", "main", "dock"];
+
+function slotOf(panel: Exclude<SlotPanel, null>): SlotName | null {
+	for (const s of SLOT_NAMES) {
+		if (layoutSlots[s] === panel) return s;
+	}
+	return null;
+}
+
+function syncFlagsFromSlots(): void {
+	thinkingOn = slotOf("thinking") !== null;
+	toolsOn = slotOf("tools") !== null;
+	filesOn = slotOf("files") !== null;
+}
+
+function hasNonBareSlots(): boolean {
+	return (
+		layoutSlots.topLeft !== null ||
+		layoutSlots.topRight !== null ||
+		layoutSlots.main !== "messages" ||
+		layoutSlots.dock !== null
+	);
+}
 
 const bandToolsColsFor = (total: number) => bandToolsColsForPct(total, toolsWidthPct);
 const dockColsFor = (cols: number) => dockColsForManual(cols, filesWidth);
@@ -1113,18 +1150,19 @@ const anyPanelActive = () =>
 // those panels running after a /split off. Layout-layer checks remain in use
 // only for layout ownership (anyPanelActive/filesActive).
 const panelsActive = () =>
-	thinkingOn || toolsOn || filesOn || trimResponse;
+	hasNonBareSlots() || trimResponse;
 const filesActive = () => isLayoutLayerActive("files") || !!REG.active;
 
 // ─── mouse: drag-resize, header buttons, wheel routing ───────────────────────
 
-/** Mouse wiring of one panel (thinking / tools band panel, or files dock). */
+/** Mouse wiring of one panel (band panel, dock, or zoomed panel). */
 interface PanelCtl {
 	id: PanelId;
 	/** Panel lives in the band (its bottom border drags the band height). */
 	inBand: boolean;
-	/** The panel's left edge column is a width-drag handle. */
-	resizeLeft: boolean;
+	/** The panel's left edge column is a width-drag handle ("tools" = band
+	 * split between topLeft/topRight, "dock" = right dock width). */
+	resizeLeft: "tools" | "dock" | false;
 	/** Body ScrollView — wheel over the frame scrolls it (B3). */
 	scroll?: ScrollView;
 }
@@ -1135,8 +1173,8 @@ const geo: {
 	bandStack?: VStack;
 	band?: Component;
 	panelStack?: HStack;
-	thinkPanel?: Component;
-	toolsPanel?: Component;
+	leftBandPanel?: Component;
+	rightBandPanel?: Component;
 	dockStack?: HStack;
 	dockPanel?: Component;
 } = {};
@@ -1154,13 +1192,13 @@ function stackEntry(stack: unknown, component: Component | undefined): any {
 	return entries?.find((e) => e.component === component);
 }
 
-/** Band width available next to the files dock. */
+/** Band width available next to the right dock. */
 function bandBase(cols: number): number {
-	const dockVisible = filesOn && cols >= MIN_TERM_WIDTH;
+	const dockVisible = layoutSlots.dock !== null && cols >= MIN_TERM_WIDTH;
 	return cols - (dockVisible ? dockColsFor(cols) : 0);
 }
 
-/** Recompute dock width, band height and the thinking|tools split from the
+/** Recompute dock width, band height and the topLeft|topRight split from the
  * current state and mutate the composed entries in place. */
 function applyGeometry(): void {
 	const cols = tuiRef?.terminal?.columns ?? 120;
@@ -1176,13 +1214,13 @@ function applyGeometry(): void {
 		bandEntry.basis = bandHeight;
 		bandEntry.minSize = Math.min(6, bandHeight);
 	}
-	const t = stackEntry(geo.panelStack, geo.thinkPanel);
-	const u = stackEntry(geo.panelStack, geo.toolsPanel);
-	if (t && u) {
+	const left = stackEntry(geo.panelStack, geo.leftBandPanel);
+	const right = stackEntry(geo.panelStack, geo.rightBandPanel);
+	if (left && right) {
 		const base = bandBase(cols);
-		const toolsW = bandToolsColsFor(base);
-		t.basis = base - toolsW;
-		u.basis = toolsW;
+		const rightW = bandToolsColsFor(base);
+		left.basis = base - rightW;
+		right.basis = rightW;
 	}
 	requestRender();
 }
@@ -1218,7 +1256,7 @@ function continueDrag(ev: TuiMouseEvent): TuiMouseEventResult {
 	} else if (d.kind === "tools") {
 		const base = Math.max(1, bandBase(cols));
 		const w = d.start - (ev.screenX - d.x);
-		toolsWidthPct = Math.max(20, Math.min(60, Math.round((w * 100) / base)));
+		toolsWidthPct = Math.max(20, Math.min(80, Math.round((w * 100) / base)));
 	} else {
 		filesWidth = dockColsForManual(cols, d.start - (ev.screenX - d.x));
 	}
@@ -1285,12 +1323,21 @@ const PANEL_LABELS: Record<PanelId, [string, string]> = {
 	thinking: ["Thinking", "/split-thinking"],
 	tools: ["Tools", "/split-tools"],
 	files: ["Files", "/files"],
+	messages: ["Messages", "/split-slot"],
 };
 
 function hidePanel(id: PanelId): void {
-	if (id === "thinking") thinkingOn = false;
-	else if (id === "tools") toolsOn = false;
-	else filesOn = false;
+	const s = slotOf(id);
+	if (s) layoutSlots[s] = null;
+	if (
+		layoutSlots.topLeft === null &&
+		layoutSlots.topRight === null &&
+		layoutSlots.main === null &&
+		layoutSlots.dock === null
+	) {
+		layoutSlots.main = "messages";
+	}
+	syncFlagsFromSlots();
 	if (zoomed === id) zoomed = null;
 	recompose();
 	const [label, cmd] = PANEL_LABELS[id];
@@ -1326,7 +1373,7 @@ function panelMouse(
 		if (where === "top" && buttonAt(ev)) return { capture: true };
 		if (where === "bottom" && liveButtonAt(ev, ctl.id)) return { capture: true };
 		if (ctl.resizeLeft && ev.x === 0)
-			return beginDrag(ctl.id === "files" ? "dock" : "tools", ev);
+			return beginDrag(ctl.resizeLeft, ev);
 		if (where === "bottom" && ctl.inBand) return beginDrag("height", ev);
 		return undefined;
 	}
@@ -1629,7 +1676,9 @@ class FilesPanel {
 	) {}
 
 	handleMouse(ev: TuiMouseEvent): TuiMouseEventResult | undefined {
-		return panelMouse(ev, this.ctl, ev.y === 0 ? "top" : "body");
+		const where =
+			ev.y === 0 ? "top" : ev.y >= ev.height - 1 ? "bottom" : "body";
+		return panelMouse(ev, this.ctl, where);
 	}
 
 	// No handleInput: the regular-mode overlay is nonCapturing, so it never
@@ -1873,39 +1922,116 @@ class BandSeparator implements Component {
 	dispose(): void {}
 }
 
-function buildBand(theme: Theme, inner: Component): Component {
-	const ids: ("thinking" | "tools")[] = [];
-	if (thinkingOn) ids.push("thinking");
-	if (toolsOn) ids.push("tools");
-	// No enabled sub-panels → no band at all.
-	if (ids.length === 0) return inner;
+function buildSlotPanel(
+	theme: Theme,
+	id: Exclude<SlotPanel, null>,
+	slot: SlotName,
+	base: Component | null,
+	ctl: PanelCtl,
+): Component {
+	if (id === "thinking" || id === "tools") {
+		return framedPanel(theme, bandDef(theme, id), ctl);
+	}
+	if (id === "files") {
+		const heightProviderForSlot = (): number => {
+			if (slot === "topLeft" || slot === "topRight") return bandHeight;
+			const rows = tuiRef?.terminal?.rows ?? 24;
+			if (slot === "dock") return rows;
+			// slot === "main": terminal rows minus band (if visible & fits) and editor dock.
+			const cols = tuiRef?.terminal?.columns ?? 80;
+			const editorDock = base ? baseDockOf(base) : null;
+			const dockH = editorDock ? editorDock.render(cols).length : 0;
+			const hasBand =
+				(layoutSlots.topLeft !== null || layoutSlots.topRight !== null) &&
+				rows - bandHeight - 1 >= MIN_ROWS_BELOW_BAND;
+			const bandH = hasBand ? bandHeight + 1 : 0;
+			return Math.max(8, rows - bandH - dockH);
+		};
+		return new FilesPanel(theme, heightProviderForSlot, ctl);
+	}
+	// id === "messages"
+	const msgScroll =
+		trimResponse && base
+			? ensureResponseScrollView(theme, base)
+			: (base ? baseTranscriptOf(base) : null) ??
+				(base ? ensureResponseScrollView(theme, base) : new Spacer(1));
+	if (slot === "main") {
+		return msgScroll;
+	}
+	if (msgScroll instanceof ScrollView) ctl.scroll = msgScroll;
+	return new MeasurementSafeVStack([
+		{
+			component: new BorderTop(theme, "Messages", "accent", () => false, ctl),
+			basis: 1,
+			grow: 0,
+			shrink: 0,
+		},
+		{ component: msgScroll, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+		{ component: new BorderBottom(theme, ctl), basis: 1, grow: 0, shrink: 0 },
+	]);
+}
+
+function buildBand(
+	theme: Theme,
+	inner: Component,
+	base: Component | null,
+): Component {
+	const slots: { slot: "topLeft" | "topRight"; id: Exclude<SlotPanel, null> }[] = [];
+	if (layoutSlots.topLeft !== null)
+		slots.push({ slot: "topLeft", id: layoutSlots.topLeft });
+	if (layoutSlots.topRight !== null)
+		slots.push({ slot: "topRight", id: layoutSlots.topRight });
+	// No enabled band slots → no band at all.
+	if (slots.length === 0) return inner;
 
 	// F/F2: explicit tunable width split (toolsWidthPct of the band base, i.e.
-	// the terminal minus a visible files dock). Single panels take the full
+	// the terminal minus a visible right dock). Single panels take the full
 	// width. applyGeometry() sets the bases and re-applies them on drags and
 	// resizes without rebuilding the tree.
-	const splitBand = ids.length === 2;
-	const panels = ids.map((id) =>
-		framedPanel(theme, bandDef(theme, id), {
+	const splitBand = slots.length === 2;
+	const panels = slots.map(({ slot, id }) =>
+		buildSlotPanel(theme, id, slot, base, {
 			id,
 			inBand: true,
-			// The boundary between the panels is the tools panel's left edge.
-			resizeLeft: splitBand && id === "tools",
+			// The boundary between the two band slots is the right panel's left edge.
+			resizeLeft: splitBand && slot === "topRight" ? "tools" : false,
 		}),
 	);
 	const band = splitBand
-		? new HStack(panels.map((component) => ({ component, basis: 1, grow: 0, shrink: 1, minSize: 1 })))
+		? new HStack(
+				panels.map((component) => ({
+					component,
+					basis: 1,
+					grow: 0,
+					shrink: 1,
+					minSize: 1,
+				})),
+			)
 		: panels[0]!;
 	if (splitBand) {
 		geo.panelStack = band as HStack;
-		geo.thinkPanel = panels[0];
-		geo.toolsPanel = panels[1];
+		geo.leftBandPanel = panels[0];
+		geo.rightBandPanel = panels[1];
 	}
-	// B2: on short terminals hide the band instead of squeezing the transcript.
-	const fits = (v: { height: number }) => v.height - bandHeight - 1 >= MIN_ROWS_BELOW_BAND;
+	// B2: on short terminals hide the band instead of squeezing the main area.
+	const fits = (v: { height: number }) =>
+		v.height - bandHeight - 1 >= MIN_ROWS_BELOW_BAND;
 	const stack = new VStack([
-		{ component: band, basis: bandHeight, grow: 0, shrink: 1, minSize: Math.min(6, bandHeight), visible: fits },
-		{ component: new BandSeparator(theme), basis: 1, grow: 0, shrink: 0, visible: fits },
+		{
+			component: band,
+			basis: bandHeight,
+			grow: 0,
+			shrink: 1,
+			minSize: Math.min(6, bandHeight),
+			visible: fits,
+		},
+		{
+			component: new BandSeparator(theme),
+			basis: 1,
+			grow: 0,
+			shrink: 0,
+			visible: fits,
+		},
 		{ component: inner, basis: 0, grow: 1, shrink: 1, minSize: 1 },
 	]);
 	geo.bandStack = stack;
@@ -1913,17 +2039,22 @@ function buildBand(theme: Theme, inner: Component): Component {
 	return stack;
 }
 
-function buildFilesDock(theme: Theme, inner: Component): Component {
+function buildFilesDock(
+	theme: Theme,
+	inner: Component,
+	base: Component | null,
+	dockId: Exclude<SlotPanel, null>,
+): Component {
 	const cols = tuiRef?.terminal?.columns ?? 120;
 	const panelCols = dockColsFor(cols);
-	const panel = new FilesPanel(theme, () => tuiRef?.terminal?.rows ?? 0, {
-		id: "files",
+	const panel = buildSlotPanel(theme, dockId, "dock", base, {
+		id: dockId,
 		inBand: false,
-		resizeLeft: true,
+		resizeLeft: "dock",
 	});
 	// Wrap the left subtree in a MeasurementSafeVStack — the dock HStack's
 	// discarded intrinsic-height measurement would otherwise eagerly render the
-	// ENTIRE left side (band + transcript) every keystroke frame. ENTRY FORM
+	// ENTIRE left side (band + main) every keystroke frame. ENTRY FORM
 	// MATTERS: a bare component defaults to grow:0, and this wrapper's sentinel
 	// render measures as 1 row — a shorter-than-screen left subtree would then
 	// collapse to its intrinsic height instead of stretching.
@@ -1946,15 +2077,16 @@ function buildFilesDock(theme: Theme, inner: Component): Component {
 	return stack;
 }
 
-/** Whether a zoomable panel is currently enabled (and composable). */
+/** Whether a zoomable panel is currently placed in a slot (and composable). */
 function panelOn(id: PanelId): boolean {
-	if (id === "thinking") return thinkingOn;
-	if (id === "tools") return toolsOn;
-	return filesOn && typeof tuiRef?.setLayoutRoot === "function";
+	const slot = slotOf(id);
+	if (!slot) return false;
+	if (slot === "dock") return typeof tuiRef?.setLayoutRoot === "function";
+	return true;
 }
 
 /** D1: one panel over the whole area above pi's editor dock (reused verbatim,
- * like trim mode); the transcript is hidden until the zoom is restored. */
+ * like trim mode); the other slots are hidden until the zoom is restored. */
 function buildZoom(theme: Theme, id: PanelId): Component | null {
 	const base = getBaseRoot();
 	const dock = base ? baseDockOf(base) : null;
@@ -1973,7 +2105,9 @@ function buildZoom(theme: Theme, id: PanelId): Component | null {
 						),
 					ctl,
 				)
-			: framedPanel(theme, bandDef(theme, id), ctl);
+			: id === "messages"
+				? buildSlotPanel(theme, "messages", "dock", base, ctl)
+				: framedPanel(theme, bandDef(theme, id), ctl);
 	return new VStack([
 		{ component: panel, basis: 0, grow: 1, shrink: 1, minSize: 1 },
 		{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
@@ -2130,12 +2264,8 @@ class ResponseBody implements Component {
 	}
 }
 
-/** Build the trimmed inner: VStack([responseScroll, dock]) like pi's viewport. */
-function buildTrimInner(theme: Theme): Component | null {
-	const base = getBaseRoot();
-	if (!base) return null;
-	const dock = baseDockOf(base);
-	if (!dock) return null;
+/** Lazily create/reuse the response-only ScrollView over buildTrimDoc(base). */
+function ensureResponseScrollView(theme: Theme, base: Component): ScrollView {
 	if (!responseScrollView) {
 		responseScrollView = new ScrollView(buildTrimDoc(base), {
 			follow: "end",
@@ -2149,43 +2279,69 @@ function buildTrimInner(theme: Theme): Component | null {
 			scrollbarThumbStyle: (t: string) => theme.fg("accent", t),
 		});
 	}
-	return new VStack([
-		{ component: responseScrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-		{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
-	]);
+	return responseScrollView;
 }
 
-/** Build the full composed layout root based on enabled panels. */
+/** Build the full composed layout root based on named slots. */
 function composeLayout(theme: Theme, inner: Component): Component {
 	// Geometry refs belong to the tree being built; drop stale ones first.
 	for (const k of Object.keys(geo) as (keyof typeof geo)[]) delete geo[k];
+	toolsScroll = null;
 	composedTermCols = tuiRef?.terminal?.columns ?? 120;
 	if (zoomed && panelOn(zoomed)) {
 		const z = buildZoom(theme, zoomed);
 		if (z) return z;
 	}
-	// Trim mode swaps pi's transcript for the response doc; the base root's
-	// dock (editor/footer) is preserved inside the swapped inner.
-	let root = inner;
-	if (trimResponse) {
-		const trimmed = buildTrimInner(theme);
-		if (trimmed) root = trimmed;
+	const base = getBaseRoot();
+	const editorDock = base ? baseDockOf(base) : null;
+
+	// Build main region with editorDock ALWAYS pinned at the bottom of the left column.
+	let root: Component;
+	if (base && editorDock) {
+		if (layoutSlots.main === "messages" && !trimResponse) {
+			root = inner;
+		} else if (layoutSlots.main !== null) {
+			const mainComp = buildSlotPanel(theme, layoutSlots.main, "main", base, {
+				id: layoutSlots.main,
+				inBand: false,
+				resizeLeft: false,
+			});
+			root = new VStack([
+				{ component: mainComp, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+				{ component: editorDock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+			]);
+		} else {
+			root = new VStack([
+				{ component: new Spacer(1), basis: 0, grow: 1, shrink: 1, minSize: 1 },
+				{ component: editorDock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+			]);
+		}
+	} else {
+		root = inner;
 	}
-	const wantBand = thinkingOn || toolsOn;
-	if (wantBand) root = buildBand(theme, root);
-	if (filesOn && tuiRef && typeof tuiRef.setLayoutRoot === "function")
-		root = buildFilesDock(theme, root);
+
+	const wantBand =
+		layoutSlots.topLeft !== null || layoutSlots.topRight !== null;
+	if (wantBand) root = buildBand(theme, root, base);
+	if (
+		layoutSlots.dock !== null &&
+		tuiRef &&
+		typeof tuiRef.setLayoutRoot === "function"
+	) {
+		root = buildFilesDock(theme, root, base, layoutSlots.dock);
+	}
 	// Set the real bases (dock width, band height, width split) on the
 	// freshly built entries.
 	applyGeometry();
 	return root;
 }
 
-/** Reconcile the single "ui" layout layer with the current panel flags. */
+/** Reconcile the single "ui" layout layer with the current panel slots/flags. */
 function reconcileLayout(theme: Theme): void {
 	drag = null;
 	if (zoomed && !panelOn(zoomed)) zoomed = null;
-	const wantAny = thinkingOn || toolsOn || filesOn || trimResponse;
+	const wantAny =
+		hasNonBareSlots() || thinkingOn || toolsOn || filesOn || trimResponse;
 	if (!wantAny || !tuiRef || typeof tuiRef.setLayoutRoot !== "function") {
 		if (isLayoutLayerActive("ui")) setLayoutLayer("ui", null);
 		return;
@@ -2352,17 +2508,22 @@ export default function (pi: ExtensionAPI) {
 				tools: false,
 				files: false,
 				trimResponse: false,
+				slots: {
+					topLeft: null,
+					topRight: null,
+					main: "messages",
+					dock: null,
+				},
 			};
 		}
-		thinkingOn = cfg.thinking;
+		layoutSlots = { ...cfg.slots };
+		syncFlagsFromSlots();
 		thinkingScope = cfg.thinkingScope;
-		toolsOn = cfg.tools;
 		toolMode = cfg.toolMode;
 		bandHeight = cfg.bandHeight;
 		toolsWidthPct = cfg.toolsWidthPct;
 		filesWidth = cfg.filesWidth;
 		zoomed = null;
-		filesOn = cfg.files;
 		showDiff = cfg.diff;
 		answerDividerMode = cfg.answerDivider;
 		trimResponse = cfg.trimResponse;
@@ -2627,13 +2788,24 @@ export default function (pi: ExtensionAPI) {
 		}
 		// Fullscreen: use the composed layer.
 		if (tuiRef && typeof tuiRef.setLayoutRoot === "function") {
-			if (filesOn) {
-				filesOn = false;
+			const existingSlot = slotOf("files");
+			if (existingSlot !== null) {
+				layoutSlots[existingSlot] = null;
+				if (
+					layoutSlots.topLeft === null &&
+					layoutSlots.topRight === null &&
+					layoutSlots.main === null &&
+					layoutSlots.dock === null
+				) {
+					layoutSlots.main = "messages";
+				}
+				syncFlagsFromSlots();
 				reconcileLayout(ctx.ui.theme);
 				ctx.ui.notify("Files panel closed", "info");
 				return false;
 			}
-			filesOn = true;
+			layoutSlots = assignSlot(layoutSlots, "dock", "files");
+			syncFlagsFromSlots();
 			reconcileLayout(ctx.ui.theme);
 			// SV-24: be truthful when the dock is composed but gated invisible
 			// — the entry's visible callback hides it below MIN_TERM_WIDTH, so
@@ -2718,43 +2890,87 @@ export default function (pi: ExtensionAPI) {
 			// toolMode, toolsWidthPct) is session-local and not reset here.
 			const wasOn = panelsActive();
 			if (wasOn) {
-				thinkingOn = false;
-				toolsOn = false;
-				filesOn = false;
+				layoutSlots = {
+					topLeft: null,
+					topRight: null,
+					main: "messages",
+					dock: null,
+				};
+				syncFlagsFromSlots();
 				trimResponse = false;
 				zoomed = null;
 				reconcileLayout(ctx.ui.theme);
 				ctx.ui.notify("Split view off (all panels) · /split-save saves defaults", "info");
 			} else {
 				const cfg = normalizeConfig(loadUiPanelsConfig());
-				if (!cfg.thinking && !cfg.tools && !cfg.files && !cfg.trimResponse) {
-					thinkingOn = true;
-					toolsOn = true;
+				const savedBare =
+					cfg.slots.topLeft === null &&
+					cfg.slots.topRight === null &&
+					cfg.slots.main === "messages" &&
+					cfg.slots.dock === null &&
+					!cfg.trimResponse;
+				if (savedBare) {
+					layoutSlots = {
+						topLeft: "thinking",
+						topRight: "tools",
+						main: "messages",
+						dock: null,
+					};
 				} else {
-					thinkingOn = cfg.thinking;
-					toolsOn = cfg.tools;
-					filesOn = cfg.files;
+					layoutSlots = { ...cfg.slots };
 					showDiff = cfg.diff;
 					answerDividerMode = cfg.answerDivider;
 					trimResponse = cfg.trimResponse;
 					responseSource = cfg.responseSource;
 				}
+				syncFlagsFromSlots();
 				reconcileLayout(ctx.ui.theme);
 				ctx.ui.notify("Split view on (saved layout) · /split-save saves defaults", "info");
 			}
 		},
 	});
 
+	/** Toggle a band panel (thinking/tools) in/out of layoutSlots while keeping
+	 * flags in sync. */
+	const toggleBandPanel = (
+		panel: "thinking" | "tools",
+		preferredSlot: "topLeft" | "topRight",
+	): boolean => {
+		const existing = slotOf(panel);
+		if (existing !== null) {
+			layoutSlots[existing] = null;
+			if (
+				layoutSlots.topLeft === null &&
+				layoutSlots.topRight === null &&
+				layoutSlots.main === null &&
+				layoutSlots.dock === null
+			) {
+				layoutSlots.main = "messages";
+			}
+			syncFlagsFromSlots();
+			return false;
+		}
+		const fallbackSlot = preferredSlot === "topLeft" ? "topRight" : "topLeft";
+		const target =
+			layoutSlots[preferredSlot] === null
+				? preferredSlot
+				: layoutSlots[fallbackSlot] === null
+					? fallbackSlot
+					: preferredSlot;
+		layoutSlots = assignSlot(layoutSlots, target, panel);
+		syncFlagsFromSlots();
+		return true;
+	};
+
 	pi.registerCommand("split-thinking", {
 		description: "Toggle the thinking panel within the band",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") return;
-			thinkingOn = !thinkingOn;
-			if (thinkingOn || toolsOn) {
-				reconcileLayout(ctx.ui.theme);
-				ctx.ui.notify(`Thinking ${thinkingOn ? "on" : "off"}`, "info");
+			const on = toggleBandPanel("thinking", "topLeft");
+			reconcileLayout(ctx.ui.theme);
+			if (layoutSlots.topLeft !== null || layoutSlots.topRight !== null) {
+				ctx.ui.notify(`Thinking ${on ? "on" : "off"}`, "info");
 			} else {
-				reconcileLayout(ctx.ui.theme);
 				ctx.ui.notify("Band off (no panels)", "info");
 			}
 		},
@@ -2785,9 +3001,9 @@ export default function (pi: ExtensionAPI) {
 		description: "Toggle the tools panel within the band",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") return;
-			toolsOn = !toolsOn;
+			const on = toggleBandPanel("tools", "topRight");
 			reconcileLayout(ctx.ui.theme);
-			ctx.ui.notify(`Tools ${toolsOn ? "on" : "off"}`, "info");
+			ctx.ui.notify(`Tools ${on ? "on" : "off"}`, "info");
 		},
 	});
 
@@ -2882,12 +3098,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("split-tools-width", {
-		description: "Set tools panel width as % of the band (20-60, default 35)",
+		description: "Set right band panel width as % of the band (20-80, default 35)",
 		handler: async (args, ctx) => {
 			const arg = String(args ?? "").trim();
 			if (!arg) {
 				ctx.ui.notify(
-					`Tools panel width: ${toolsWidthPct}% of the band (usage: /split-tools-width 20-60)`,
+					`Right band panel width: ${toolsWidthPct}% of the band (usage: /split-tools-width 20-80)`,
 					"info",
 				);
 				return;
@@ -2895,14 +3111,159 @@ export default function (pi: ExtensionAPI) {
 			const n = Number.parseInt(arg, 10);
 			if (Number.isNaN(n)) {
 				ctx.ui.notify(
-					"Invalid percentage (usage: /split-tools-width 20-60)",
+					"Invalid percentage (usage: /split-tools-width 20-80)",
 					"error",
 				);
 				return;
 			}
-			toolsWidthPct = Math.max(20, Math.min(60, n));
+			toolsWidthPct = Math.max(20, Math.min(80, n));
 			reconcileLayout(ctx.ui.theme);
-			ctx.ui.notify(`Tools panel width: ${toolsWidthPct}%`, "info");
+			ctx.ui.notify(`Right band panel width: ${toolsWidthPct}%`, "info");
+		},
+	});
+
+	const PRESET_OPTIONS: { name: PresetName; label: string }[] = [
+		{
+			name: "workbench",
+			label: "workbench — Tools main · Thinking | Messages top · Files dock",
+		},
+		{
+			name: "sidebar-chat",
+			label: "sidebar-chat — Tools main · Thinking top · Messages dock",
+		},
+		{
+			name: "classic",
+			label: "classic — Messages main · Thinking | Tools top · Files dock",
+		},
+		{
+			name: "deep-think",
+			label: "deep-think — Thinking main · Messages | Tools top · Files dock",
+		},
+		{
+			name: "focused-tools",
+			label: "focused-tools — Tools main · Messages top · no dock",
+		},
+	];
+
+	pi.registerCommand("split-preset", {
+		description:
+			"Apply a layout preset (workbench | sidebar-chat | classic | deep-think | focused-tools)",
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("/split-preset requires interactive mode", "error");
+				return;
+			}
+			if (!tuiRef || typeof tuiRef.setLayoutRoot !== "function") {
+				ctx.ui.notify("/split-preset requires fullscreen mode", "warning");
+				return;
+			}
+			let chosen: PresetName | undefined;
+			const arg = String(args ?? "").trim().toLowerCase();
+			if (!arg) {
+				const labels = PRESET_OPTIONS.map((p) => p.label);
+				const pick = await ctx.ui.select("Choose a split-view layout preset", labels);
+				if (pick === undefined) return;
+				const idx = labels.indexOf(pick);
+				chosen = idx >= 0 ? PRESET_OPTIONS[idx]?.name : undefined;
+			} else if (Object.hasOwn(LAYOUT_PRESETS, arg)) {
+				chosen = arg as PresetName;
+			} else {
+				ctx.ui.notify(
+					`Unknown preset "${arg}". Available: ${PRESET_OPTIONS.map((p) => p.name).join(", ")}`,
+					"error",
+				);
+				return;
+			}
+			if (!chosen) return;
+			const preset = LAYOUT_PRESETS[chosen];
+			layoutSlots = { ...preset.slots };
+			bandHeight = preset.bandHeight;
+			toolsWidthPct = preset.toolsWidthPct;
+			filesWidth = preset.filesWidth;
+			zoomed = null;
+			syncFlagsFromSlots();
+			const base = getBaseRoot();
+			if (
+				slotOf("messages") !== null &&
+				slotOf("messages") !== "main" &&
+				slotOf("tools") !== null &&
+				base &&
+				baseDockOf(base)
+			) {
+				trimResponse = true;
+			}
+			reconcileLayout(ctx.ui.theme);
+			ctx.ui.notify(`Layout preset: ${chosen}`, "info");
+		},
+	});
+
+	pi.registerCommand("split-slot", {
+		description:
+			"Assign a panel to a slot: /split-slot <topLeft|topRight|main|dock> <thinking|tools|messages|files|none>",
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("/split-slot requires interactive mode", "error");
+				return;
+			}
+			if (!tuiRef || typeof tuiRef.setLayoutRoot !== "function") {
+				ctx.ui.notify("/split-slot requires fullscreen mode", "warning");
+				return;
+			}
+			const parts = String(args ?? "")
+				.trim()
+				.split(/\s+/)
+				.filter(Boolean);
+			if (parts.length !== 2) {
+				ctx.ui.notify(
+					"Usage: /split-slot <topLeft|topRight|main|dock> <thinking|tools|messages|files|none>",
+					"info",
+				);
+				return;
+			}
+			const slotMap: Record<string, SlotName> = {
+				topleft: "topLeft",
+				topright: "topRight",
+				main: "main",
+				dock: "dock",
+			};
+			const slot = slotMap[parts[0]!.toLowerCase()];
+			if (!slot) {
+				ctx.ui.notify(
+					`Invalid slot "${parts[0]}". Use: topLeft, topRight, main, dock`,
+					"error",
+				);
+				return;
+			}
+			const panelRaw = parts[1]!.toLowerCase();
+			let panel: SlotPanel;
+			if (panelRaw === "none" || panelRaw === "null") {
+				panel = null;
+			} else if (
+				panelRaw === "thinking" ||
+				panelRaw === "tools" ||
+				panelRaw === "messages" ||
+				panelRaw === "files"
+			) {
+				panel = panelRaw;
+			} else {
+				ctx.ui.notify(
+					`Invalid panel "${parts[1]}". Use: thinking, tools, messages, files, none`,
+					"error",
+				);
+				return;
+			}
+			layoutSlots = assignSlot(layoutSlots, slot, panel);
+			if (
+				layoutSlots.topLeft === null &&
+				layoutSlots.topRight === null &&
+				layoutSlots.main === null &&
+				layoutSlots.dock === null
+			) {
+				layoutSlots.main = "messages";
+			}
+			syncFlagsFromSlots();
+			reconcileLayout(ctx.ui.theme);
+			ctx.ui.notify(`Slot ${slot}: ${panel ?? "none"}`, "info");
 		},
 	});
 
@@ -2988,10 +3349,14 @@ export default function (pi: ExtensionAPI) {
 				filesOn || (REG.active !== null && REG.activeGen === MY_GEN);
 			// SV-13: report the real outcome — success only after a durable write.
 			const saved = saveUiPanelsConfig({
-				split: thinkingOn || toolsOn,
+				split:
+					layoutSlots.topLeft !== null ||
+					layoutSlots.topRight !== null ||
+					layoutSlots.main !== "messages",
 				thinking: thinkingOn,
 				tools: toolsOn,
 				files: filesEffective,
+				slots: { ...layoutSlots },
 				toolMode,
 				trimResponse,
 				thinkingScope,

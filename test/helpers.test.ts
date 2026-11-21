@@ -17,7 +17,13 @@ import {
 	thoughtsSinceLastUser,
 	truncateInline,
 } from "../helpers.ts";
-import { normalizeConfig } from "../ui-panels-config.ts";
+import {
+	assignSlot,
+	LAYOUT_PRESETS,
+	normalizeConfig,
+	type LayoutSlots,
+	type PresetName,
+} from "../ui-panels-config.ts";
 
 test("truncateInline collapses whitespace and never splits a surrogate pair", () => {
 	assert.equal(truncateInline("  a\n  b\tc  "), "a b c");
@@ -305,4 +311,166 @@ test("bashPathCandidates skips globs, redirects, and unknown variables", () => {
 	assert.deepEqual(paths("cat $UNKNOWN/a.ts *.md 2>/dev/null"), ["/work/cat"]);
 	assert.deepEqual(paths("p=$(pwd); cat $p/a.ts"), ["/work/cat"]);
 	assert.ok(!paths("cd $UNKNOWN && cat a.ts").includes("/a.ts"));
+});
+
+test("normalizeConfig: legacy config without slots derives slots from flags", () => {
+	const bare = normalizeConfig({});
+	assert.deepEqual(bare.slots, {
+		topLeft: null,
+		topRight: null,
+		main: "messages",
+		dock: null,
+	});
+	const classic = normalizeConfig({ split: true, files: true });
+	assert.deepEqual(classic.slots, {
+		topLeft: "thinking",
+		topRight: "tools",
+		main: "messages",
+		dock: "files",
+	});
+	assert.equal(classic.thinking, true);
+	assert.equal(classic.tools, true);
+	assert.equal(classic.files, true);
+	const thinkOnly = normalizeConfig({ split: true, tools: false });
+	assert.deepEqual(thinkOnly.slots, {
+		topLeft: "thinking",
+		topRight: null,
+		main: "messages",
+		dock: null,
+	});
+	// Invalid slots shape falls back to legacy flags.
+	const badSlots = normalizeConfig({ split: true, slots: "bad" as never });
+	assert.deepEqual(badSlots.slots, {
+		topLeft: "thinking",
+		topRight: "tools",
+		main: "messages",
+		dock: null,
+	});
+});
+
+test("normalizeConfig: explicit slots normalize, deduplicate, and sync flags", () => {
+	const wb = normalizeConfig({
+		slots: {
+			topLeft: "thinking",
+			topRight: "messages",
+			main: "tools",
+			dock: "files",
+		},
+	});
+	assert.deepEqual(wb.slots, {
+		topLeft: "thinking",
+		topRight: "messages",
+		main: "tools",
+		dock: "files",
+	});
+	assert.equal(wb.split, true);
+	assert.equal(wb.thinking, true);
+	assert.equal(wb.tools, true);
+	assert.equal(wb.files, true);
+
+	// Deduplication order: main, topLeft, topRight, dock.
+	const dedup = normalizeConfig({
+		slots: {
+			main: "tools",
+			topLeft: "tools",
+			topRight: "thinking",
+			dock: "thinking",
+		},
+	});
+	assert.deepEqual(dedup.slots, {
+		main: "tools",
+		topLeft: null,
+		topRight: "thinking",
+		dock: null,
+	});
+	assert.equal(dedup.tools, true);
+	assert.equal(dedup.thinking, true);
+	assert.equal(dedup.files, false);
+
+	// Invalid panel values become null; all-empty falls back to main: "messages".
+	const allBad = normalizeConfig({
+		slots: {
+			topLeft: "bogus" as never,
+			topRight: 123 as never,
+			main: null,
+			dock: null,
+		},
+	});
+	assert.deepEqual(allBad.slots, {
+		topLeft: null,
+		topRight: null,
+		main: "messages",
+		dock: null,
+	});
+	assert.equal(allBad.split, false);
+	assert.equal(allBad.thinking, false);
+	assert.equal(allBad.tools, false);
+	assert.equal(allBad.files, false);
+});
+
+test("LAYOUT_PRESETS: all 5 presets exist and normalize cleanly", () => {
+	const names: PresetName[] = [
+		"classic",
+		"workbench",
+		"sidebar-chat",
+		"deep-think",
+		"focused-tools",
+	];
+	assert.deepEqual(Object.keys(LAYOUT_PRESETS).sort(), [...names].sort());
+	for (const name of names) {
+		const p = LAYOUT_PRESETS[name];
+		const norm = normalizeConfig({
+			slots: p.slots,
+			bandHeight: p.bandHeight,
+			toolsWidthPct: p.toolsWidthPct,
+			...(p.filesWidth === null ? {} : { filesWidth: p.filesWidth }),
+		});
+		assert.deepEqual(norm.slots, p.slots);
+		assert.equal(norm.bandHeight, p.bandHeight);
+		assert.equal(norm.toolsWidthPct, p.toolsWidthPct);
+		assert.equal(norm.filesWidth, p.filesWidth);
+	}
+});
+
+test("assignSlot assigns to empty slot, swaps occupied slots, and clears with null", () => {
+	const base: LayoutSlots = {
+		topLeft: "thinking",
+		topRight: null,
+		main: "messages",
+		dock: "files",
+	};
+	// Assign unplaced panel into empty slot.
+	const added = assignSlot(base, "topRight", "tools");
+	assert.deepEqual(added, {
+		topLeft: "thinking",
+		topRight: "tools",
+		main: "messages",
+		dock: "files",
+	});
+	// Swap two occupied slots (tools into main swaps messages into topRight).
+	const swapped = assignSlot(added, "main", "tools");
+	assert.deepEqual(swapped, {
+		topLeft: "thinking",
+		topRight: "messages",
+		main: "tools",
+		dock: "files",
+	});
+	// Move occupied panel into an empty slot (clears its old slot).
+	const moved = assignSlot(base, "topRight", "files");
+	assert.deepEqual(moved, {
+		topLeft: "thinking",
+		topRight: "files",
+		main: "messages",
+		dock: null,
+	});
+	// Clear a slot with null.
+	const cleared = assignSlot(added, "dock", null);
+	assert.deepEqual(cleared, {
+		topLeft: "thinking",
+		topRight: "tools",
+		main: "messages",
+		dock: null,
+	});
+	// Input object is not mutated.
+	assert.equal(base.topRight, null);
 });

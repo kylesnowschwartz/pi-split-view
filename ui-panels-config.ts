@@ -26,6 +26,106 @@ export type ToolMode = "compact" | "full";
  * oldest rows out. */
 export type ThinkingScope = "turn" | "session";
 export type ResponseSource = "messages" | "transcript";
+export type SlotName = "topLeft" | "topRight" | "main" | "dock";
+export type SlotPanel = "thinking" | "tools" | "messages" | "files" | null;
+export type LayoutSlots = Record<SlotName, SlotPanel>;
+export type PresetName =
+	| "workbench"
+	| "sidebar-chat"
+	| "classic"
+	| "deep-think"
+	| "focused-tools";
+
+export interface LayoutPreset {
+	slots: LayoutSlots;
+	bandHeight: number;
+	toolsWidthPct: number;
+	filesWidth: number | null;
+}
+
+export const LAYOUT_PRESETS: Record<PresetName, LayoutPreset> = {
+	classic: {
+		slots: {
+			topLeft: "thinking",
+			topRight: "tools",
+			main: "messages",
+			dock: "files",
+		},
+		bandHeight: 20,
+		toolsWidthPct: 35,
+		filesWidth: null,
+	},
+	workbench: {
+		slots: {
+			topLeft: "thinking",
+			topRight: "messages",
+			main: "tools",
+			dock: "files",
+		},
+		bandHeight: 14,
+		toolsWidthPct: 50,
+		filesWidth: 34,
+	},
+	"sidebar-chat": {
+		slots: {
+			topLeft: "thinking",
+			topRight: null,
+			main: "tools",
+			dock: "messages",
+		},
+		bandHeight: 10,
+		toolsWidthPct: 35,
+		filesWidth: 48,
+	},
+	"deep-think": {
+		slots: {
+			topLeft: "messages",
+			topRight: "tools",
+			main: "thinking",
+			dock: "files",
+		},
+		bandHeight: 14,
+		toolsWidthPct: 55,
+		filesWidth: 34,
+	},
+	"focused-tools": {
+		slots: {
+			topLeft: "messages",
+			topRight: null,
+			main: "tools",
+			dock: null,
+		},
+		bandHeight: 12,
+		toolsWidthPct: 35,
+		filesWidth: null,
+	},
+};
+
+const VALID_PANELS = new Set<string>(["thinking", "tools", "messages", "files"]);
+const SLOT_DEDUP_ORDER: readonly SlotName[] = ["main", "topLeft", "topRight", "dock"];
+
+/** Assign `panel` to `slot`. If `panel` is non-null and currently occupies
+ * another slot, swap that slot with the previous occupant of `slot` so a panel
+ * is never duplicated across slots. */
+export function assignSlot(
+	slots: LayoutSlots,
+	slot: SlotName,
+	panel: SlotPanel,
+): LayoutSlots {
+	const next: LayoutSlots = { ...slots };
+	const prev = next[slot];
+	if (panel === prev) return next;
+	if (panel !== null) {
+		for (const other of SLOT_DEDUP_ORDER) {
+			if (other !== slot && next[other] === panel) {
+				next[other] = prev;
+				break;
+			}
+		}
+	}
+	next[slot] = panel;
+	return next;
+}
 
 export interface UiPanelsConfig {
 	/** Master: is the top band (thinking | tools over chat) active. */
@@ -55,11 +155,13 @@ export interface UiPanelsConfig {
 	responseSource?: ResponseSource;
 	/** Top band height in rows (6–40, default 20). */
 	bandHeight?: number;
-	/** Tools panel's share of the band width in percent (20–60, default 35). */
+	/** Right band panel's share of the band width in percent (20–80, default 35). */
 	toolsWidthPct?: number;
-	/** Files dock width in columns (set by dragging its edge). Absent = auto
+	/** Dock width in columns (set by dragging its edge). Absent = auto
 	 * (25% of the terminal, 34–48 cols). */
 	filesWidth?: number;
+	/** Named layout slot assignments (topLeft, topRight, main, dock). */
+	slots?: Partial<LayoutSlots>;
 }
 
 /** SV-12: strict boolean read — only real booleans count; absent or
@@ -68,6 +170,12 @@ export interface UiPanelsConfig {
  * accidental truthy flag. */
 function boolOr(value: unknown, fallback: boolean): boolean {
 	return typeof value === "boolean" ? value : fallback;
+}
+
+function normalizeSlotValue(value: unknown): SlotPanel {
+	return typeof value === "string" && VALID_PANELS.has(value)
+		? (value as Exclude<SlotPanel, null>)
+		: null;
 }
 
 /** Normalize raw config with defaults (never throws). */
@@ -85,6 +193,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 	bandHeight: number;
 	toolsWidthPct: number;
 	filesWidth: number | null;
+	slots: LayoutSlots;
 }> {
 	// SV-12: tolerate any shape — a null root, an array or a primitive reads
 	// as an empty config instead of throwing on property access.
@@ -92,7 +201,6 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		typeof raw === "object" && raw !== null && !Array.isArray(raw)
 			? raw
 			: {};
-	const split = boolOr(root.split, false);
 	const tm: ToolMode = root.toolMode === "full" ? "full" : "compact";
 	// SV-12: only a real finite number is usable; Number(null) === 0 would
 	// otherwise clamp to 6. Non-numeric/unusable values use the default.
@@ -103,24 +211,83 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 			: 20;
 	const bandHeight = Math.max(6, Math.min(40, usableHeight));
 	// F: toolsWidthPct — same strict typing as bandHeight (real finite number,
-	// default 35 on garbage), clamped to 20–60.
+	// default 35 on garbage), clamped to 20–80.
 	const rawPct: unknown = root.toolsWidthPct;
 	const usablePct =
 		typeof rawPct === "number" && Number.isFinite(rawPct)
 			? Math.trunc(rawPct)
 			: 35;
-	const toolsWidthPct = Math.max(20, Math.min(60, usablePct));
+	const toolsWidthPct = Math.max(20, Math.min(80, usablePct));
 	// filesWidth: a real finite number ≥ 24 cols (capped at 200), else auto.
 	const rawFw: unknown = root.filesWidth;
 	const filesWidth =
 		typeof rawFw === "number" && Number.isFinite(rawFw) && rawFw >= 24
 			? Math.min(200, Math.trunc(rawFw))
 			: null;
+
+	const rawSlots: unknown = root.slots;
+	const hasExplicitSlots =
+		typeof rawSlots === "object" &&
+		rawSlots !== null &&
+		!Array.isArray(rawSlots);
+
+	let split: boolean;
+	let thinking: boolean;
+	let tools: boolean;
+	let files: boolean;
+	let slots: LayoutSlots;
+
+	if (hasExplicitSlots) {
+		const src = rawSlots as Record<string, unknown>;
+		const seen = new Set<string>();
+		const out: LayoutSlots = {
+			topLeft: null,
+			topRight: null,
+			main: null,
+			dock: null,
+		};
+		for (const slot of SLOT_DEDUP_ORDER) {
+			const val = normalizeSlotValue(src[slot]);
+			if (val !== null && !seen.has(val)) {
+				seen.add(val);
+				out[slot] = val;
+			}
+		}
+		if (
+			out.topLeft === null &&
+			out.topRight === null &&
+			out.main === null &&
+			out.dock === null
+		) {
+			out.main = "messages";
+			seen.add("messages");
+		}
+		slots = out;
+		thinking = seen.has("thinking");
+		tools = seen.has("tools");
+		files = seen.has("files");
+		split =
+			slots.topLeft !== null ||
+			slots.topRight !== null ||
+			slots.main !== "messages";
+	} else {
+		split = boolOr(root.split, false);
+		thinking = split && boolOr(root.thinking, true);
+		tools = split && boolOr(root.tools, true);
+		files = boolOr(root.files, false);
+		slots = {
+			topLeft: thinking ? "thinking" : null,
+			topRight: tools ? "tools" : null,
+			main: "messages",
+			dock: files ? "files" : null,
+		};
+	}
+
 	return {
 		split,
-		thinking: split && boolOr(root.thinking, true),
-		tools: split && boolOr(root.tools, true),
-		files: boolOr(root.files, false),
+		thinking,
+		tools,
+		files,
 		diff: boolOr(root.diff, true),
 		answerDivider: root.answerDivider === "space" ? "space" : "rule",
 		toolMode: tm,
@@ -133,6 +300,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		bandHeight,
 		toolsWidthPct,
 		filesWidth,
+		slots,
 	};
 }
 
