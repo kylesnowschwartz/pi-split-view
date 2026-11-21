@@ -15,6 +15,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ToolsScope } from "./helpers.ts";
+
+export type { ToolsScope };
 
 const CONFIG_PATH = path.join(homedir(), ".pi", "agent", "ui-panels.json");
 
@@ -169,6 +172,9 @@ export interface UiPanelsConfig {
 	answerDivider?: "rule" | "space";
 	/** Tool panel detail mode. */
 	toolMode?: ToolMode;
+	/** Tool panel turn scope: "visible" (auto-sync with Messages viewport),
+	 * "turn" (latest turn only), or "all" (all turns). Defaults to "visible". */
+	toolsScope?: ToolsScope;
 	/** Panel C shows response-only (own-rendered) instead of pi's full transcript. */
 	trimResponse?: boolean;
 	/** What response-only mode draws: "messages" = user + assistant text built
@@ -213,6 +219,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 	diff: boolean;
 	answerDivider: "rule" | "space";
 	toolMode: ToolMode;
+	toolsScope: ToolsScope;
 	thinkingScope: ThinkingScope;
 	thinkingHud: boolean;
 	thinkingHudMode: ThinkingHudMode;
@@ -330,6 +337,10 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		diff: boolOr(root.diff, true),
 		answerDivider: root.answerDivider === "space" ? "space" : "rule",
 		toolMode: tm,
+		toolsScope:
+			root.toolsScope === "turn" || root.toolsScope === "all"
+				? root.toolsScope
+				: "visible",
 		// SV-27: strict read — only the literal "turn" opts in; anything else
 		// falls back to the "session" default, preserving the original behaviour.
 		thinkingScope: root.thinkingScope === "turn" ? "turn" : "session",

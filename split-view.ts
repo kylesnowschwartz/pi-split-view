@@ -167,11 +167,16 @@ import {
 	lastImageBlock,
 	liveTailLines,
 	outputPreview,
+	selectActiveTurns,
 	stripLeadingTrailingBlankLines,
+	toolsPagerButtons,
 	truncateInline,
 	thoughtsSinceLastUser,
+	visibleTurnsInViewport,
 	type ImageBlock,
 	type ToolExpandGlobal,
+	type ToolsScope,
+	type TurnSpan,
 } from "./helpers.ts";
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -299,6 +304,24 @@ let answerDividerMode: "rule" | "space" = "rule";
  * Session-local; /split-response-source, persisted by /split-save. */
 let responseSource: ResponseSource = "messages";
 let toolMode: ToolModeCfg = "compact";
+/** Tool panel turn scope: "visible" (auto-sync with Messages viewport),
+ * "turn" (latest turn only), or "all" (all turns). Persisted by /split-save. */
+let toolsScope: ToolsScope = "visible";
+/** 1-indexed user turn counter for the current branch. */
+let currentTurn = 0;
+/** Manually pinned turn via [◀]/[▶] or /split-turn <N>, or null for auto/all. */
+let pinnedTurn: number | null = null;
+/** Short (~32-char) preview of each user prompt, keyed by 1-indexed turn. */
+const turnPreviews = new Map<number, string>();
+/** Row spans of each turn in the Messages ScrollView, recorded on render. */
+let messageTurnSpans: TurnSpan[] = [];
+/** Mounted Messages ScrollView (trimmed or native), captured on compose. */
+let messagesScrollRef: ScrollView | null = null;
+/** Last observed visible-turns key ("1,2"), guarding against redundant renders. */
+let lastVisibleTurnsKey = "";
+/** Suppress clearing pinnedTurn on the render immediately following a
+ * programmatic scrollTo(span.startRow) triggered by pager/command navigation. */
+let suppressNextPinClear = false;
 /** Live-output focus of the tools panel (bottom-frame [▶] /
  * /split-tools-live): the id of the PINNED tool whose raw output stream the
  * panel shows, or null. Pinned once chosen — a newer streaming tool never
@@ -390,6 +413,7 @@ interface ThinkingBlock {
 	lines: string[];
 	tail: string;
 	complete: boolean;
+	turn: number;
 }
 
 /**
@@ -460,12 +484,13 @@ const thinking = {
 			this.current.complete = true;
 			this.blocks.push(this.current);
 		}
-		this.current = { lines: [], tail: "", complete: false };
+		this.current = { lines: [], tail: "", complete: false, turn: Math.max(1, currentTurn) };
 		this.streaming = true;
 		this.version++;
 	},
 	append(delta: string) {
-		if (!this.current) this.current = { lines: [], tail: "", complete: false };
+		if (!this.current)
+			this.current = { lines: [], tail: "", complete: false, turn: Math.max(1, currentTurn) };
 		// Split complete lines first, then cap the tail (half-drop on overflow).
 		const before = this.current.lines.length;
 		this.current.tail = appendStreamTail(
@@ -559,12 +584,17 @@ const thinking = {
 function thinkingLines(theme: Theme, width: number): string[] {
 	const out: string[] = [];
 	const sep = theme.fg("dim", "─".repeat(Math.max(8, Math.min(60, width - 3))));
+	const activeTurns = thinkingScope === "session" ? activeTurnSelection() : null;
 	for (const b of thinking.blocks) {
+		if (activeTurns !== null && !activeTurns.includes(b.turn)) continue;
 		if (out.length) out.push("");
 		out.push(sep);
 		for (const l of b.lines) out.push(l);
 	}
-	if (thinking.current) {
+	if (
+		thinking.current &&
+		(activeTurns === null || activeTurns.includes(thinking.current.turn))
+	) {
 		if (out.length) out.push("");
 		for (const l of thinking.current.lines) out.push(l);
 		if (thinking.current.tail) out.push(thinking.current.tail);
@@ -755,6 +785,8 @@ interface ToolEntry {
 	output: string;
 	active: boolean;
 	isError: boolean;
+	/** 1-indexed user turn that triggered this tool call. */
+	turn: number;
 	subagent?: boolean;
 	agent?: string;
 	/** Last image block of the result (e.g. `read` on an image file), so the
@@ -904,6 +936,7 @@ function ingestToolCall(id: string, name: string, args: any, startedAt?: number)
 		output: "",
 		active: true,
 		isError: false,
+		turn: Math.max(1, currentTurn),
 		startedAt,
 	});
 	if (startedAt !== undefined) ensureToolTicker();
@@ -1380,6 +1413,130 @@ function liveButtonAt(ev: TuiMouseEvent, id: PanelId): boolean {
 	);
 }
 
+/** Sync visible turns from the Messages ScrollView viewport. When the user
+ * actively scrolls Messages, clears any manual `pinnedTurn` so auto-sync
+ * resumes seamlessly. */
+function syncVisibleTurnsFromMessages(scheduleRender = true): number[] {
+	const visible = messagesScrollRef
+		? visibleTurnsInViewport(
+				messageTurnSpans,
+				messagesScrollRef.scrollTop,
+				messagesScrollRef.viewportHeight,
+			)
+		: [];
+	const key = visible.join(",");
+	if (key !== lastVisibleTurnsKey) {
+		if (suppressNextPinClear) {
+			suppressNextPinClear = false;
+		} else if (
+			lastVisibleTurnsKey !== "" &&
+			messagesScrollRef &&
+			!messagesScrollRef.isFollowingEnd
+		) {
+			pinnedTurn = null;
+		}
+		lastVisibleTurnsKey = key;
+		toolsVersionCounter++;
+		thinking.version++;
+		if (scheduleRender) {
+			requestRender();
+		} else {
+			queueMicrotask(() => {
+				if (anyPanelActive()) requestRender();
+			});
+		}
+	}
+	return visible;
+}
+
+/** Currently active turn(s) for Tool Usage and Thinking, or null for all. */
+function activeTurnSelection(): number[] | null {
+	const visible = messagesScrollRef
+		? visibleTurnsInViewport(
+				messageTurnSpans,
+				messagesScrollRef.scrollTop,
+				messagesScrollRef.viewportHeight,
+			)
+		: [];
+	return selectActiveTurns({
+		scope: toolsScope,
+		totalTurns: currentTurn,
+		pinnedTurn,
+		visibleTurns: visible,
+	});
+}
+
+function toolsPagerLabel(activeTurns: number[] | null, totalTurns: number): string {
+	if (activeTurns === null) return `All (${totalTurns})`;
+	if (activeTurns.length === 0) return `Turn 0/${totalTurns}`;
+	if (activeTurns.length === 1) return `Turn ${activeTurns[0]}/${totalTurns}`;
+	return `Turn ${activeTurns[0]}-${activeTurns[activeTurns.length - 1]}/${totalTurns}`;
+}
+
+function scrollMessagesToTurn(turn: number): void {
+	if (!messagesScrollRef) return;
+	const span = messageTurnSpans.find((s) => s.turn === turn);
+	if (!span) return;
+	suppressNextPinClear = true;
+	messagesScrollRef.scrollTo(span.startRow);
+}
+
+function stepTurn(delta: -1 | 1): void {
+	if (currentTurn <= 0) return;
+	const activeTurns = activeTurnSelection();
+	const anchor =
+		pinnedTurn !== null
+			? Math.max(1, Math.min(currentTurn, pinnedTurn))
+			: activeTurns && activeTurns.length > 0
+				? delta < 0
+					? activeTurns[0]!
+					: activeTurns[activeTurns.length - 1]!
+				: currentTurn;
+	if (delta < 0) {
+		const target = Math.max(1, anchor - 1);
+		pinnedTurn = target;
+		scrollMessagesToTurn(target);
+	} else {
+		const target = Math.min(currentTurn, anchor + 1);
+		if (target >= currentTurn) {
+			pinnedTurn = null;
+			messagesScrollRef?.scrollToEnd();
+		} else {
+			pinnedTurn = target;
+			scrollMessagesToTurn(target);
+		}
+	}
+	toolsVersionCounter++;
+	thinking.version++;
+	requestRender();
+}
+
+function toggleToolsScopeAll(): void {
+	toolsScope = toolsScope === "all" ? "visible" : "all";
+	pinnedTurn = null;
+	toolsVersionCounter++;
+	thinking.version++;
+	requestRender();
+}
+
+function pagerHitTest(
+	ev: TuiMouseEvent,
+	id: PanelId,
+): "prev" | "next" | "toggle" | null {
+	if (ev.y !== 0 || id !== "tools" || currentTurn <= 0 || ev.width < 30) {
+		return null;
+	}
+	const activeTurns = activeTurnSelection();
+	const label = toolsPagerLabel(activeTurns, currentTurn);
+	const hasLive = liveButtonShown(id, ev.width);
+	const layout = toolsPagerButtons(ev.width, label, toolsScope, hasLive);
+	if (!layout) return null;
+	if (ev.x >= layout.prev.start && ev.x < layout.prev.end) return "prev";
+	if (ev.x >= layout.next.start && ev.x < layout.next.end) return "next";
+	if (ev.x >= layout.toggle.start && ev.x < layout.toggle.end) return "toggle";
+	return null;
+}
+
 function recompose(): void {
 	if (themeGetter) reconcileLayout(themeGetter());
 }
@@ -1450,12 +1607,17 @@ function panelMouse(
 		// doing nothing is better than scrolling the transcript from under the
 		// cursor.
 		ctl.scroll?.scrollBy(ev.wheelDelta ?? 0);
+		if (ctl.id === "messages") {
+			suppressNextPinClear = false;
+			syncVisibleTurnsFromMessages(true);
+		}
 		return { handled: true };
 	}
 	if (ev.button !== "left") return undefined;
 	if (ev.type === "press") {
 		if (where === "top" && buttonAt(ev)) return { capture: true };
-		if (where === "bottom" && liveButtonAt(ev, ctl.id)) return { capture: true };
+		if (where === "bottom" && (liveButtonAt(ev, ctl.id) || pagerHitTest(ev, ctl.id)))
+			return { capture: true };
 		if (ctl.resizeLeft && ev.x === 0)
 			return beginDrag(ctl.resizeLeft, ev);
 		if (where === "bottom" && ctl.inBand) return beginDrag("height", ev);
@@ -1467,9 +1629,24 @@ function panelMouse(
 		else if (b === "close") hidePanel(ctl.id);
 		if (b) return { handled: true };
 	}
-	if (ev.type === "click" && where === "bottom" && liveButtonAt(ev, ctl.id)) {
-		toggleToolsLive();
-		return { handled: true };
+	if (ev.type === "click" && where === "bottom") {
+		if (liveButtonAt(ev, ctl.id)) {
+			toggleToolsLive();
+			return { handled: true };
+		}
+		const pagerHit = pagerHitTest(ev, ctl.id);
+		if (pagerHit === "prev") {
+			stepTurn(-1);
+			return { handled: true };
+		}
+		if (pagerHit === "next") {
+			stepTurn(1);
+			return { handled: true };
+		}
+		if (pagerHit === "toggle") {
+			toggleToolsScopeAll();
+			return { handled: true };
+		}
 	}
 	return undefined;
 }
@@ -1510,7 +1687,54 @@ class BorderBottom implements Component {
 	) {}
 	render(width: number): string[] {
 		const th = this.theme;
-		if (liveButtonShown(this.ctl?.id, width)) {
+		const hasLive = liveButtonShown(this.ctl?.id, width);
+		if (this.ctl?.id === "tools" && currentTurn > 0 && width >= 30) {
+			const activeTurns = activeTurnSelection();
+			const label = toolsPagerLabel(activeTurns, currentTurn);
+			const layout = toolsPagerButtons(width, label, toolsScope, hasLive);
+			if (layout) {
+				const on = liveToolId !== null;
+				const anchor =
+					pinnedTurn !== null
+						? Math.max(1, Math.min(currentTurn, pinnedTurn))
+						: activeTurns && activeTurns.length > 0
+							? activeTurns[0]!
+							: currentTurn;
+				const canPrev = anchor > 1;
+				const canNext =
+					pinnedTurn !== null ||
+					(activeTurns !== null &&
+						activeTurns.length > 0 &&
+						activeTurns[activeTurns.length - 1]! < currentTurn);
+				const isAll = toolsScope === "all" && pinnedTurn === null;
+				const prevBtn = th.fg(canPrev ? "accent" : "dim", "[◀]");
+				const nextBtn = th.fg(canNext ? "accent" : "dim", "[▶]");
+				const labelStr = th.fg(
+					pinnedTurn !== null ? "warning" : "muted",
+					` ${layout.label} `,
+				);
+				const toggleBtn = th.fg(
+					isAll ? "accent" : "muted",
+					layout.toggle.text,
+				);
+				const fill = th.fg("border", "─".repeat(layout.fillCols));
+				const right = hasLive
+					? th.fg(on ? "warning" : "muted", on ? "[◼]" : "[▶]") +
+						th.fg("border", "─╯")
+					: th.fg("border", "╯");
+				return [
+					th.fg("border", "╰─") +
+						prevBtn +
+						labelStr +
+						nextBtn +
+						th.fg("border", "─") +
+						toggleBtn +
+						fill +
+						right,
+				];
+			}
+		}
+		if (hasLive) {
 			const on = liveToolId !== null;
 			return [
 				th.fg("border", "╰" + "─".repeat(width - 6)) +
@@ -1792,6 +2016,7 @@ class RichToolsBody implements Component {
 	private cacheMinRows = -1;
 	private cacheZoomed = false;
 	private cacheLiveId: string | null = null;
+	private cacheTurnsKey = "";
 	private cacheByWidth = new Map<
 		number,
 		{ rows: string[]; headerRows: Map<number, string> }
@@ -1814,16 +2039,20 @@ class RichToolsBody implements Component {
 		const v = this.version();
 		const min = Math.max(1, this.minRows());
 		const zoomedTools = zoomed === "tools";
+		const activeTurns = activeTurnSelection();
+		const turnsKey = activeTurns === null ? "all" : activeTurns.join(",");
 		if (
 			v !== this.cacheVersion ||
 			min !== this.cacheMinRows ||
 			zoomedTools !== this.cacheZoomed ||
-			liveToolId !== this.cacheLiveId
+			liveToolId !== this.cacheLiveId ||
+			turnsKey !== this.cacheTurnsKey
 		) {
 			this.cacheVersion = v;
 			this.cacheMinRows = min;
 			this.cacheZoomed = zoomedTools;
 			this.cacheLiveId = liveToolId;
+			this.cacheTurnsKey = turnsKey;
 			this.cacheByWidth.clear();
 		}
 		const cached = this.cacheByWidth.get(width);
@@ -1872,41 +2101,69 @@ class RichToolsBody implements Component {
 		} else if (toolOrder.length === 0) {
 			emitLine(th.fg("dim", this.empty));
 		} else {
-			const liveComps = findLiveToolComponents();
-			for (const id of toolOrder) {
-				const entry = toolsBy.get(id);
-				if (!entry) continue;
-				const expanded = isToolExpanded(
-					entry,
-					toolExpandOverrides,
-					toolExpandGlobal,
-					zoomedTools,
-				);
-				headerRows.set(rows.length, entry.id);
-				emitLine(this.formatHeader(entry, expanded, innerWidth));
+			const filteredIds =
+				activeTurns === null
+					? toolOrder
+					: toolOrder.filter((id) => {
+							const e = toolsBy.get(id);
+							return e ? activeTurns.includes(e.turn) : false;
+						});
+			if (filteredIds.length === 0) {
+				const turnDesc =
+					activeTurns && activeTurns.length === 1
+						? `Turn ${activeTurns[0]}`
+						: activeTurns && activeTurns.length > 1
+							? `Turns ${activeTurns[0]}-${activeTurns[activeTurns.length - 1]}`
+							: "this turn";
+				emitLine(th.fg("dim", `No tools in ${turnDesc} (click ◀/▶ or [All])`));
+			} else {
+				const liveComps = findLiveToolComponents();
+				const showTurnHeaders = activeTurns !== null && activeTurns.length > 1;
+				let lastRenderedTurn = -1;
+				for (const id of filteredIds) {
+					const entry = toolsBy.get(id);
+					if (!entry) continue;
+					if (showTurnHeaders && entry.turn !== lastRenderedTurn) {
+						lastRenderedTurn = entry.turn;
+						const preview = turnPreviews.get(entry.turn);
+						const header =
+							th.fg("dim", "── ") +
+							th.fg("accent", `Turn ${entry.turn}`) +
+							(preview ? th.fg("dim", ` · ${preview}`) : "") +
+							th.fg("dim", " ──");
+						emitLine(header);
+					}
+					const expanded = isToolExpanded(
+						entry,
+						toolExpandOverrides,
+						toolExpandGlobal,
+						zoomedTools,
+					);
+					headerRows.set(rows.length, entry.id);
+					emitLine(this.formatHeader(entry, expanded, innerWidth));
 
-				if (!expanded) continue;
+					if (!expanded) continue;
 
-				const lower = entry.name.toLowerCase();
-				if (lower === "bash") {
-					this.renderRichBashBody(entry, innerWidth, zoomedTools, emitLine);
-				} else if (
-					(lower === "read" || lower === "write") &&
-					!entry.image &&
-					this.renderRichCodeBody(entry, innerWidth, zoomedTools, emitLine)
-				) {
-					// Rendered with Tree-sitter / syntax highlighting.
-				} else {
-					const comp = liveComps.get(entry.id);
-					if (comp && typeof comp.render === "function") {
-						const prevExpanded = Boolean((comp as any).expanded);
-						const canToggle = typeof comp.setExpanded === "function";
-						let rendered: string[] = [];
-						try {
-							if (!prevExpanded && canToggle) {
-								comp.setExpanded(true);
-							}
-							rendered = stripLeadingTrailingBlankLines(comp.render(innerWidth));
+					const lower = entry.name.toLowerCase();
+					if (lower === "bash") {
+						this.renderRichBashBody(entry, innerWidth, zoomedTools, emitLine);
+					} else if (
+						(lower === "read" || lower === "write") &&
+						!entry.image &&
+						this.renderRichCodeBody(entry, innerWidth, zoomedTools, emitLine)
+					) {
+						// Rendered with Tree-sitter / syntax highlighting.
+					} else {
+						const comp = liveComps.get(entry.id);
+						if (comp && typeof comp.render === "function") {
+							const prevExpanded = Boolean((comp as any).expanded);
+							const canToggle = typeof comp.setExpanded === "function";
+							let rendered: string[] = [];
+							try {
+								if (!prevExpanded && canToggle) {
+									comp.setExpanded(true);
+								}
+								rendered = stripLeadingTrailingBlankLines(comp.render(innerWidth));
 						} catch {
 							rendered = [];
 						} finally {
@@ -1929,6 +2186,7 @@ class RichToolsBody implements Component {
 				}
 				// Visual separation after an expanded card.
 				rows.push(filler);
+				}
 			}
 		}
 
@@ -2642,6 +2900,7 @@ function buildSlotPanel(
 			? ensureResponseScrollView(theme, base)
 			: (base ? baseTranscriptOf(base) : null) ??
 				(base ? ensureResponseScrollView(theme, base) : new Spacer(1));
+	if (msgScroll instanceof ScrollView) messagesScrollRef = msgScroll;
 	if (slot === "main") {
 		return msgScroll;
 	}
@@ -2888,9 +3147,22 @@ function baseDockOf(base: any): Component | null {
  * expected [header, resources, chat] triple; any other shape degrades to the
  * old response-only doc (never risk mounting chatContainer here).
  */
+class ResponseDocHostContainer extends Container {
+	override render(width: number): string[] {
+		const lines: string[] = [];
+		for (const child of this.children) {
+			if (child instanceof ResponseBody) {
+				child.setRowOffset(lines.length);
+			}
+			for (const l of child.render(width)) lines.push(l);
+		}
+		return lines;
+	}
+}
+
 function buildTrimDoc(base: Component): Container {
 	if (!responseDocHost) {
-		responseDocHost = new Container();
+		responseDocHost = new ResponseDocHostContainer();
 		try {
 			const kids = (baseTranscriptOf(base) as any)?.child?.children;
 			if (Array.isArray(kids) && kids.length === 3) {
@@ -2920,19 +3192,19 @@ class TranscriptWithoutTools extends Container {
 		this.chat = chat;
 	}
 
-	private sync(): void {
+	syncChildren(): void {
 		this.children = this.chat.children.filter((child) =>
 			keepsInResponseOnly(child as any),
 		);
 	}
 
 	override render(width: number): string[] {
-		this.sync();
+		this.syncChildren();
 		return super.render(width);
 	}
 
 	override handleMouse(event: any) {
-		this.sync();
+		this.syncChildren();
 		return super.handleMouse(event);
 	}
 
@@ -2949,6 +3221,7 @@ class TranscriptWithoutTools extends Container {
  */
 class ResponseBody implements Component {
 	private readonly transcript: TranscriptWithoutTools | null;
+	private rowOffset = 0;
 
 	constructor(base: Component) {
 		let chat: unknown;
@@ -2964,6 +3237,10 @@ class ResponseBody implements Component {
 				: null;
 	}
 
+	setRowOffset(offset: number): void {
+		this.rowOffset = offset;
+	}
+
 	private active(): Container {
 		return responseSource === "transcript" && this.transcript
 			? this.transcript
@@ -2971,7 +3248,30 @@ class ResponseBody implements Component {
 	}
 
 	render(width: number): string[] {
-		return this.active().render(width);
+		const active = this.active();
+		if (active instanceof TranscriptWithoutTools) {
+			active.syncChildren();
+		}
+		const lines: string[] = [];
+		const spans: TurnSpan[] = [];
+		let turn = 0;
+		let activeSpan: TurnSpan | null = null;
+		for (const child of active.children) {
+			const childLines = child.render(width);
+			const startRow = this.rowOffset + lines.length;
+			for (const l of childLines) lines.push(l);
+			const endRow = this.rowOffset + lines.length;
+			if (child.constructor?.name === "UserMessageComponent") {
+				turn++;
+				activeSpan = { turn, startRow, endRow };
+				spans.push(activeSpan);
+			} else if (activeSpan) {
+				activeSpan.endRow = endRow;
+			}
+		}
+		messageTurnSpans = spans;
+		syncVisibleTurnsFromMessages(false);
+		return lines;
 	}
 
 	handleMouse(event: any) {
@@ -3008,6 +3308,7 @@ function composeLayout(theme: Theme, inner: Component): Component {
 	for (const k of Object.keys(geo) as (keyof typeof geo)[]) delete geo[k];
 	toolsScroll = null;
 	thinkingBody = null;
+	messagesScrollRef = null;
 	composedTermCols = tuiRef?.terminal?.columns ?? 120;
 	if (zoomed && panelOn(zoomed)) {
 		const z = buildZoom(theme, zoomed);
@@ -3030,6 +3331,8 @@ function composeLayout(theme: Theme, inner: Component): Component {
 	let root: Component;
 	if (base && editorDock) {
 		if (!editorInDock && layoutSlots.main === "messages" && !trimResponse) {
+			const baseTranscript = baseTranscriptOf(base);
+			if (baseTranscript instanceof ScrollView) messagesScrollRef = baseTranscript;
 			root = inner;
 		} else if (layoutSlots.main !== null) {
 			const mainComp = buildSlotPanel(theme, layoutSlots.main, "main", base, {
@@ -3162,6 +3465,12 @@ export default function (pi: ExtensionAPI) {
 		toolOrder.length = 0;
 		toolExpandOverrides.clear();
 		liveToolId = null;
+		currentTurn = 0;
+		turnPreviews.clear();
+		pinnedTurn = null;
+		messageTurnSpans = [];
+		lastVisibleTurnsKey = "";
+		suppressNextPinClear = false;
 		toolsVersionCounter++;
 		files.clear();
 		bumpFilesVersion();
@@ -3173,11 +3482,16 @@ export default function (pi: ExtensionAPI) {
 		// reconstruction makes the same cut the live buffer does. Without this a
 		// resumed session would show every earlier turn until the next user
 		// message happened to clear it.
-		const turns: { isUser: boolean; thoughts: string[] }[] = [];
+		const turns: { isUser: boolean; turn: number; thoughts: string[] }[] = [];
 		for (const entry of branch) {
 			if (entry.type !== "message") continue;
 			const msg = (entry as any).message;
 			if (!msg) continue;
+			if (msg.role === "user") {
+				currentTurn++;
+				const preview = truncateInline(messageText(msg), 32);
+				if (preview) turnPreviews.set(currentTurn, preview);
+			}
 			const msgThoughts: string[] = [];
 			if (msg.role === "assistant" && Array.isArray(msg.content)) {
 				for (const c of msg.content) {
@@ -3197,7 +3511,11 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			if (msg.role === "user" || msg.role === "assistant")
-				turns.push({ isUser: msg.role === "user", thoughts: msgThoughts });
+				turns.push({
+					isUser: msg.role === "user",
+					turn: Math.max(1, currentTurn),
+					thoughts: msgThoughts,
+				});
 			// Reconstruct the last edit diff from persisted tool-result details.
 			if (msg.role === "toolResult" && msg.toolName === "edit") {
 				const d = msg.details;
@@ -3218,15 +3536,23 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		}
-		const thoughts: string[] = [];
+		const thoughts: { text: string; turn: number }[] = [];
 		if (thinkingScope === "turn") {
-			for (const t of thoughtsSinceLastUser(turns)) thoughts.push(t);
+			const latestTurn = Math.max(1, currentTurn);
+			for (const t of thoughtsSinceLastUser(turns))
+				thoughts.push({ text: t, turn: latestTurn });
 		} else {
-			for (const turn of turns) for (const t of turn.thoughts) thoughts.push(t);
+			for (const turn of turns)
+				for (const t of turn.thoughts) thoughts.push({ text: t, turn: turn.turn });
 		}
 		if (thoughts.length) {
 			for (const t of thoughts) {
-				thinking.current = { lines: t.split(/\r?\n/), tail: "", complete: true };
+				thinking.current = {
+					lines: t.text.split(/\r?\n/),
+					tail: "",
+					complete: true,
+					turn: t.turn,
+				};
 				thinking.blocks.push(thinking.current);
 				thinking.current = null;
 			}
@@ -3266,6 +3592,7 @@ export default function (pi: ExtensionAPI) {
 		thinkingScope = cfg.thinkingScope;
 		thinkingHudMode = cfg.thinkingHudMode;
 		toolMode = cfg.toolMode;
+		toolsScope = cfg.toolsScope;
 		toolExpandGlobal = null;
 		bandHeight = cfg.bandHeight;
 		toolsWidthPct = cfg.toolsWidthPct;
@@ -3337,10 +3664,18 @@ export default function (pi: ExtensionAPI) {
 		// the transcript, and reconstruct() restores it on resume/branch switch).
 		// Clearing on thinking_start instead would wipe the earlier blocks of the
 		// SAME turn, since one assistant message can stream several of them.
-		if (msg?.role === "user" && thinkingScope === "turn") {
-			thinking.reset();
+		if (msg?.role === "user") {
+			currentTurn++;
+			const preview = truncateInline(messageText(msg), 32);
+			if (preview) turnPreviews.set(currentTurn, preview);
+			pinnedTurn = null;
+			toolsVersionCounter++;
+			thinking.version++;
+			if (thinkingScope === "turn") {
+				thinking.reset();
+			}
+			addResponseMessage(msg);
 		}
-		if (msg?.role === "user") addResponseMessage(msg);
 		if (anyPanelActive()) requestRender();
 	});
 	pi.on("message_end", (event) => {
@@ -3488,6 +3823,7 @@ export default function (pi: ExtensionAPI) {
 			output: "",
 			active: false,
 			isError: false,
+			turn: Math.max(1, currentTurn),
 			subagent: true,
 			agent,
 		});
@@ -4166,6 +4502,81 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("split-turn", {
+		description: "Page Tool Usage & Thinking panels by turn: prev | next | live | all | <N>",
+		handler: async (args, ctx) => {
+			const arg = (args ?? "").trim().toLowerCase();
+			if (!arg) {
+				const activeTurns = activeTurnSelection();
+				const label = toolsPagerLabel(activeTurns, currentTurn);
+				ctx.ui.notify(
+					`Tools turn: ${label} (scope: ${toolsScope}${pinnedTurn !== null ? `, pinned #${pinnedTurn}` : ""})`,
+					"info",
+				);
+				return;
+			}
+			if (arg === "prev") {
+				if (currentTurn <= 0) {
+					ctx.ui.notify("No turns yet", "info");
+					return;
+				}
+				stepTurn(-1);
+				const label = toolsPagerLabel(activeTurnSelection(), currentTurn);
+				ctx.ui.notify(`Tools turn: ${label}`, "info");
+				return;
+			}
+			if (arg === "next") {
+				if (currentTurn <= 0) {
+					ctx.ui.notify("No turns yet", "info");
+					return;
+				}
+				stepTurn(1);
+				const label = toolsPagerLabel(activeTurnSelection(), currentTurn);
+				ctx.ui.notify(`Tools turn: ${label}`, "info");
+				return;
+			}
+			if (arg === "live" || arg === "visible") {
+				toolsScope = "visible";
+				pinnedTurn = null;
+				messagesScrollRef?.scrollToEnd();
+				toolsVersionCounter++;
+				thinking.version++;
+				requestRender();
+				ctx.ui.notify("Tools turn: live auto-sync (visible)", "info");
+				return;
+			}
+			if (arg === "all") {
+				toolsScope = "all";
+				pinnedTurn = null;
+				toolsVersionCounter++;
+				thinking.version++;
+				requestRender();
+				ctx.ui.notify("Tools turn: showing all turns", "info");
+				return;
+			}
+			if (/^\d+$/.test(arg)) {
+				const parsed = parseInt(arg, 10);
+				if (parsed < 1) {
+					ctx.ui.notify("Usage: /split-turn [prev|next|live|all|<N>]", "warning");
+					return;
+				}
+				if (currentTurn <= 0) {
+					ctx.ui.notify("No turns yet", "info");
+					return;
+				}
+				const target = Math.max(1, Math.min(currentTurn, parsed));
+				pinnedTurn = target;
+				scrollMessagesToTurn(target);
+				toolsVersionCounter++;
+				thinking.version++;
+				requestRender();
+				ctx.ui.notify(`Tools turn: pinned to Turn ${target}/${currentTurn}`, "info");
+				return;
+			}
+			ctx.ui.notify("Usage: /split-turn [prev|next|live|all|<N>]", "warning");
+		},
+	});
+
 	pi.registerCommand("split-save", {
 		description: "Save current panel layout as the startup defaults",
 		handler: async (_args, ctx) => {
@@ -4185,6 +4596,7 @@ export default function (pi: ExtensionAPI) {
 				files: filesEffective,
 				slots: { ...layoutSlots },
 				toolMode,
+				toolsScope,
 				trimResponse,
 				thinkingScope,
 				thinkingHud: thinkingHudMode !== "off",

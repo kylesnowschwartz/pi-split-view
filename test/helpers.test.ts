@@ -19,12 +19,16 @@ import {
 	lastImageBlock,
 	liveTailLines,
 	outputPreview,
+	selectActiveTurns,
 	stripLeadingTrailingBlankLines,
 	styleThinkingLine,
 	thoughtsSinceLastUser,
 	tokenizeThinkingLine,
+	toolsPagerButtons,
 	truncateInline,
+	visibleTurnsInViewport,
 	type ThinkingPalette,
+	type TurnSpan,
 } from "../helpers.ts";
 import {
 	assignSlot,
@@ -758,6 +762,161 @@ test("normalizeConfig preserves regular-mode files: true when slots has no files
 		slots: { topLeft: null, topRight: null, main: "messages", dock: null },
 	});
 	assert.equal(hiddenFiles.files, false);
+});
+
+test("visibleTurnsInViewport handles single, multiple, out-of-range, and empty spans", () => {
+	assert.deepEqual(visibleTurnsInViewport([], 0, 20), []);
+
+	const spans: TurnSpan[] = [
+		{ turn: 1, startRow: 10, endRow: 25 },
+		{ turn: 2, startRow: 25, endRow: 45 },
+		{ turn: 3, startRow: 45, endRow: 60 },
+	];
+
+	// Single visible turn
+	assert.deepEqual(visibleTurnsInViewport(spans, 12, 10), [1]);
+	assert.deepEqual(visibleTurnsInViewport(spans, 25, 20), [2]);
+
+	// Multiple visible turns (overlapping boundary)
+	assert.deepEqual(visibleTurnsInViewport(spans, 20, 10), [1, 2]);
+	assert.deepEqual(visibleTurnsInViewport(spans, 20, 30), [1, 2, 3]);
+
+	// Scroll before first span (e.g. startup header rows 0..9)
+	assert.deepEqual(visibleTurnsInViewport(spans, 0, 5), [1]);
+
+	// Scroll past last span
+	assert.deepEqual(visibleTurnsInViewport(spans, 70, 10), [3]);
+
+	// Zero/negative viewport height clamps to 1 row
+	assert.deepEqual(visibleTurnsInViewport(spans, 25, 0), [2]);
+});
+
+test("selectActiveTurns handles all, pinnedTurn clamping, visible filtering, and fallback", () => {
+	// scope === "all" with no pin -> null (show all)
+	assert.equal(
+		selectActiveTurns({
+			scope: "all",
+			totalTurns: 5,
+			pinnedTurn: null,
+			visibleTurns: [2, 3],
+		}),
+		null,
+	);
+
+	// totalTurns <= 0 -> []
+	assert.deepEqual(
+		selectActiveTurns({
+			scope: "visible",
+			totalTurns: 0,
+			pinnedTurn: null,
+			visibleTurns: [1],
+		}),
+		[],
+	);
+
+	// pinnedTurn overrides both "visible" and "all" and clamps to [1, totalTurns]
+	assert.deepEqual(
+		selectActiveTurns({
+			scope: "all",
+			totalTurns: 5,
+			pinnedTurn: 3,
+			visibleTurns: [1, 2],
+		}),
+		[3],
+	);
+	assert.deepEqual(
+		selectActiveTurns({
+			scope: "visible",
+			totalTurns: 5,
+			pinnedTurn: 0,
+			visibleTurns: [2],
+		}),
+		[1],
+	);
+	assert.deepEqual(
+		selectActiveTurns({
+			scope: "visible",
+			totalTurns: 5,
+			pinnedTurn: 99,
+			visibleTurns: [2],
+		}),
+		[5],
+	);
+
+	// scope === "visible" filters invalid turns, deduplicates, and sorts ascending
+	assert.deepEqual(
+		selectActiveTurns({
+			scope: "visible",
+			totalTurns: 5,
+			pinnedTurn: null,
+			visibleTurns: [4, 2, 4, 0, 9],
+		}),
+		[2, 4],
+	);
+
+	// Fallback to latest turn when visibleTurns is empty or all invalid, or scope === "turn"
+	assert.deepEqual(
+		selectActiveTurns({
+			scope: "visible",
+			totalTurns: 5,
+			pinnedTurn: null,
+			visibleTurns: [],
+		}),
+		[5],
+	);
+	assert.deepEqual(
+		selectActiveTurns({
+			scope: "visible",
+			totalTurns: 5,
+			pinnedTurn: null,
+			visibleTurns: [0, 8],
+		}),
+		[5],
+	);
+	assert.deepEqual(
+		selectActiveTurns({
+			scope: "turn",
+			totalTurns: 5,
+			pinnedTurn: null,
+			visibleTurns: [1, 2],
+		}),
+		[5],
+	);
+});
+
+test("toolsPagerButtons computes exact non-overlapping column ranges", () => {
+	assert.equal(toolsPagerButtons(29, "Turn 1/3", "visible", false), null);
+
+	const withLive = toolsPagerButtons(40, "Turn 3/5", "visible", true);
+	assert.ok(withLive);
+	assert.deepEqual(withLive.prev, { start: 2, end: 5 });
+	assert.deepEqual(withLive.next, { start: 15, end: 18 });
+	assert.deepEqual(withLive.toggle, { start: 19, end: 24, text: "[All]" });
+	assert.equal(withLive.fillCols, 11); // 24 + 11 + 5 === 40
+
+	const allNoLive = toolsPagerButtons(32, "All (5)", "all", false);
+	assert.ok(allNoLive);
+	assert.equal(allNoLive.toggle.text, "[Sync]");
+	assert.equal(allNoLive.toggle.end + allNoLive.fillCols + 1, 32);
+});
+
+test("normalizeConfig handles toolsScope strictly with default visible", () => {
+	assert.equal(normalizeConfig({}).toolsScope, "visible");
+	assert.equal(normalizeConfig({ toolsScope: "visible" }).toolsScope, "visible");
+	assert.equal(normalizeConfig({ toolsScope: "turn" }).toolsScope, "turn");
+	assert.equal(normalizeConfig({ toolsScope: "all" }).toolsScope, "all");
+	assert.equal(
+		normalizeConfig({ toolsScope: "bogus" as any }).toolsScope,
+		"visible",
+	);
+	assert.equal(
+		normalizeConfig({ toolsScope: 123 as any }).toolsScope,
+		"visible",
+	);
+	assert.equal(
+		normalizeConfig({ toolsScope: null as any }).toolsScope,
+		"visible",
+	);
 });
 
 

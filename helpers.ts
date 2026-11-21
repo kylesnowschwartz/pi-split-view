@@ -623,6 +623,121 @@ export function styleThinkingLine(line: string, palette: ThinkingPalette): strin
 		.join("");
 }
 
+// ─── turn pagination helpers ─────────────────────────────────────────────────
+
+export interface TurnSpan {
+	turn: number;
+	startRow: number;
+	endRow: number;
+}
+
+/**
+ * Return sorted ascending unique `turn` values whose `[startRow, endRow)`
+ * overlaps the viewport `[scrollTop, scrollTop + Math.max(1, viewportHeight))`.
+ * If `spans` is empty, returns `[]`. If nothing overlaps, returns the first
+ * turn when `scrollTop < spans[0].startRow`, else the last turn.
+ */
+export function visibleTurnsInViewport(
+	spans: readonly TurnSpan[],
+	scrollTop: number,
+	viewportHeight: number,
+): number[] {
+	if (spans.length === 0) return [];
+	const vpEnd = scrollTop + Math.max(1, viewportHeight);
+	const seen = new Set<number>();
+	for (const span of spans) {
+		if (span.endRow > scrollTop && span.startRow < vpEnd) {
+			seen.add(span.turn);
+		}
+	}
+	if (seen.size > 0) {
+		return [...seen].sort((a, b) => a - b);
+	}
+	return scrollTop < spans[0]!.startRow
+		? [spans[0]!.turn]
+		: [spans[spans.length - 1]!.turn];
+}
+
+export type ToolsScope = "visible" | "turn" | "all";
+
+/**
+ * Resolve which 1-indexed turn(s) should be displayed in the Tool Usage and
+ * Thinking panels, or `null` to show all turns.
+ */
+export function selectActiveTurns(opts: {
+	scope: ToolsScope;
+	totalTurns: number;
+	pinnedTurn: number | null;
+	visibleTurns: readonly number[];
+}): number[] | null {
+	const { scope, totalTurns, pinnedTurn, visibleTurns } = opts;
+	if (scope === "all" && pinnedTurn === null) return null;
+	if (totalTurns <= 0) return [];
+	if (pinnedTurn !== null) {
+		const clamped = Math.max(1, Math.min(totalTurns, Math.trunc(pinnedTurn)));
+		return [clamped];
+	}
+	if (scope === "visible" && visibleTurns.length > 0) {
+		const seen = new Set<number>();
+		for (const t of visibleTurns) {
+			const n = Math.trunc(t);
+			if (n >= 1 && n <= totalTurns) seen.add(n);
+		}
+		if (seen.size > 0) {
+			return [...seen].sort((a, b) => a - b);
+		}
+	}
+	return [totalTurns];
+}
+
+export interface PagerButtonRange {
+	start: number;
+	end: number;
+}
+
+export interface ToolsPagerLayout {
+	prev: PagerButtonRange;
+	next: PagerButtonRange;
+	toggle: PagerButtonRange & { text: "[All]" | "[Sync]" };
+	label: string;
+	fillCols: number;
+}
+
+/**
+ * Compute exact column coordinates for the tools panel bottom-frame turn pager:
+ * `╰─[◀] <label> [▶]─[All]──…──[▶]─╯` (or `…──╯` without the live button).
+ * Shared by both rendering and mouse hit-testing.
+ */
+export function toolsPagerButtons(
+	width: number,
+	label: string,
+	scope: ToolsScope,
+	hasLiveButton: boolean,
+): ToolsPagerLayout | null {
+	if (width < 30) return null;
+	const toggleText: "[All]" | "[Sync]" = scope === "all" ? "[Sync]" : "[All]";
+	const rightReserved = hasLiveButton ? 5 : 1; // "[▶]─╯" or "╯"
+	const minFill = hasLiveButton ? 1 : 0;
+	// Fixed prefix/controls: "╰─" (2) + "[◀]" (3) + " " (1) + " " (1) + "[▶]" (3) + "─" (1) + toggleText
+	const fixedCols = 11 + toggleText.length;
+	const maxLabelLen = width - rightReserved - minFill - fixedCols;
+	if (maxLabelLen < 3) return null;
+	const displayLabel =
+		label.length > maxLabelLen ? label.slice(0, maxLabelLen) : label;
+
+	const prev: PagerButtonRange = { start: 2, end: 5 };
+	const nextStart = 5 + displayLabel.length + 2;
+	const next: PagerButtonRange = { start: nextStart, end: nextStart + 3 };
+	const toggleStart = next.end + 1;
+	const toggle = {
+		start: toggleStart,
+		end: toggleStart + toggleText.length,
+		text: toggleText,
+	};
+	const fillCols = width - rightReserved - toggle.end;
+	return { prev, next, toggle, label: displayLabel, fillCols };
+}
+
 export default function (_pi: ExtensionAPI) {
 	/* shared helper module, not a real extension */
 }
