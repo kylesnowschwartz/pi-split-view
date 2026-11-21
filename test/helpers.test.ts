@@ -7,6 +7,7 @@ import {
 	capDisplayLine,
 	capToolText,
 	dockColsFor,
+	filesPanelRowBudget,
 	formatDuration,
 	headTailPreview,
 	isCappedToolText,
@@ -473,4 +474,33 @@ test("assignSlot assigns to empty slot, swaps occupied slots, and clears with nu
 	});
 	// Input object is not mutated.
 	assert.equal(base.topRight, null);
+});
+
+test("filesPanelRowBudget shows diff section only when enabled and an edit diff exists", () => {
+	// No diff yet (even with showDiff: true) → full list rows, no diff rows.
+	assert.deepEqual(filesPanelRowBudget(30, true, false), {
+		showDiffSection: false,
+		listRows: 26,
+		diffRows: 0,
+	});
+	// Diff exists and showDiff: true → split rows (exact row accounting: listRows + diffRows + 6 === height).
+	const split = filesPanelRowBudget(30, true, true);
+	assert.deepEqual(split, {
+		showDiffSection: true,
+		listRows: 11,
+		diffRows: 13,
+	});
+	assert.equal(split.listRows + split.diffRows + 6, 30);
+	// Diff exists but showDiff: false → full list rows, no diff rows.
+	assert.deepEqual(filesPanelRowBudget(30, false, true), {
+		showDiffSection: false,
+		listRows: 26,
+		diffRows: 0,
+	});
+	// Very short height clamps safely.
+	assert.deepEqual(filesPanelRowBudget(4, true, false), {
+		showDiffSection: false,
+		listRows: 1,
+		diffRows: 0,
+	});
 });

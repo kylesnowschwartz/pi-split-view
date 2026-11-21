@@ -351,6 +351,30 @@ export function bashPathCandidates(command: string, cwd: string, home: string): 
 	return out;
 }
 
+/**
+ * Row budget for the Files panel (list + optional Last Edit diff subpanel).
+ * The diff section is shown only when both enabled (`showDiff`) and an edit
+ * diff actually exists (`hasEditDiff`); otherwise all rows go to the file list.
+ */
+export function filesPanelRowBudget(
+	height: number,
+	showDiff: boolean,
+	hasEditDiff: boolean,
+): { showDiffSection: boolean; listRows: number; diffRows: number } {
+	const showDiffSection = showDiff && hasEditDiff;
+	if (!showDiffSection) {
+		return {
+			showDiffSection: false,
+			listRows: Math.max(1, height - 4),
+			diffRows: 0,
+		};
+	}
+	const half = Math.max(6, Math.floor(height / 2));
+	const listRows = Math.max(2, half - 4);
+	const diffRows = Math.max(0, height - listRows - 6);
+	return { showDiffSection: true, listRows, diffRows };
+}
+
 export default function (_pi: ExtensionAPI) {
 	/* shared helper module, not a real extension */
 }

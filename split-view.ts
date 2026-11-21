@@ -139,6 +139,7 @@ import {
 	capDisplayLine,
 	capToolText,
 	dockColsFor as dockColsForManual,
+	filesPanelRowBudget,
 	formatDuration,
 	headTailPreview,
 	isCappedToolText,
@@ -1689,9 +1690,15 @@ class FilesPanel {
 		if (REG.gen !== MY_GEN) return [];
 		const height =
 			this.heightProvider?.() || termHeight || recentEntries().length + 12;
-		// Cache key MUST include height: a height-only terminal resize changes
-		// the list/diff row split without bumping filesVersion or width.
-		const key = `${filesVersion}|${editDiff.version}|${width}|${height}|${showDiff ? 1 : 0}`;
+		const { showDiffSection, listRows, diffRows } = filesPanelRowBudget(
+			height,
+			showDiff,
+			Boolean(editDiff.diff),
+		);
+		// Cache key MUST include height and showDiffSection: a height-only
+		// terminal resize or toggling/acquiring an edit diff changes the
+		// list/diff row split without bumping filesVersion or width.
+		const key = `${filesVersion}|${editDiff.version}|${width}|${height}|${showDiffSection ? 1 : 0}`;
 		if (key === this.cacheKey) return this.cacheLines;
 
 		const th = this.theme;
@@ -1702,19 +1709,6 @@ class FilesPanel {
 			th.fg("border", "│") + pad(truncateToWidth(c, inner)) + th.fg("border", "│");
 
 		const entries = recentEntries();
-		// Reserve the bottom half for the edit diff (min 2 list rows) when the
-		// diff subpanel is shown; otherwise the list owns the whole panel.
-		const half = Math.max(6, Math.floor(height / 2));
-		const listRows = showDiff ? Math.max(2, half - 4) : Math.max(1, height - 4);
-		// SV-06: exact row accounting so the bottom border lands on the last
-		// allocated row. Fixed chrome is 6 rows (top, title, list separator,
-		// diff separator, diff title, bottom border) and the list always pads
-		// to listRows, so the diff section gets exactly what remains. Without
-		// this a short diff left an unframed hole between the panel and the
-		// viewport bottom (the old diffRows budget was never padded when a diff
-		// existed, only when it did not). When the diff subpanel is off the
-		// chrome is 4 rows (top, title, list separator, bottom border).
-		const diffRows = showDiff ? Math.max(0, height - listRows - 6) : 0;
 
 		const meta = (e: FileEntry) =>
 			th.fg("muted", `${e.ops}${e.count > 1 ? `×${e.count}` : ""}`);
@@ -1761,9 +1755,9 @@ class FilesPanel {
 		body.push(row(` ${th.fg("dim", LEGEND)}`));
 		while (body.length < listRows) body.push(row(""));
 
-		// ── edit-diff subpanel (optional: /split-diff) ──
+		// ── edit-diff subpanel (optional: /split-diff, shown only when an edit exists) ──
 		const diffBody: string[] = [];
-		if (showDiff) {
+		if (showDiffSection) {
 			diffBody.push(th.fg("border", `├${"─".repeat(inner)}┤`));
 			// SV-05: truncate the title by DISPLAY COLUMNS (wide/CJK/emoji paths)
 			// and compute the fill from the truncated title's visible width, so the
@@ -1782,23 +1776,17 @@ class FilesPanel {
 					th.fg("border", "│"),
 			);
 
-			if (editDiff.diff) {
-				const rendered = renderDiff(editDiff.diff).split(/\r?\n/);
-				// SV-06: cap content one row below the pad target so the "… +N more"
-				// marker always fits; the section is then padded to diffRows so the
-				// frame closes on the last row.
-				const shown = rendered.slice(0, Math.max(0, diffRows - 1));
-				for (const l of shown) diffBody.push(row(` ${l}`));
-				if (rendered.length > shown.length && diffRows > 0)
-					diffBody.push(
-						row(` ${th.fg("dim", `… +${rendered.length - shown.length} more`)}`),
-					);
-				while (diffBody.length < diffRows + 2) diffBody.push(row(""));
-			} else {
-				if (diffRows > 0)
-					diffBody.push(row(` ${th.fg("dim", "No edit yet")}`));
-				while (diffBody.length < diffRows + 2) diffBody.push(row(""));
-			}
+			const rendered = renderDiff(editDiff.diff).split(/\r?\n/);
+			// SV-06: cap content one row below the pad target so the "… +N more"
+			// marker always fits; the section is then padded to diffRows so the
+			// frame closes on the last row.
+			const shown = rendered.slice(0, Math.max(0, diffRows - 1));
+			for (const l of shown) diffBody.push(row(` ${l}`));
+			if (rendered.length > shown.length && diffRows > 0)
+				diffBody.push(
+					row(` ${th.fg("dim", `… +${rendered.length - shown.length} more`)}`),
+				);
+			while (diffBody.length < diffRows + 2) diffBody.push(row(""));
 		}
 
 		const out = [
