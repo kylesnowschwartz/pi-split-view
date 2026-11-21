@@ -2555,7 +2555,11 @@ function bandDef(theme: Theme, id: "thinking" | "tools"): BandDef {
 function framedPanel(theme: Theme, d: BandDef, ctl: PanelCtl): Component {
 	// Filler rows track the real viewport (band or zoomed), so the left edge
 	// stays continuous at any allocated height.
-	const minRows = () => ctl.scroll?.viewportHeight || bandHeight - 2;
+	const minRows = () =>
+		ctl.scroll?.viewportHeight ||
+		(ctl.inBand
+			? bandHeight - 2
+			: Math.max(1, (tuiRef?.terminal?.rows ?? 24) - bandHeight - 2));
 	const body: Component =
 		ctl.id === "tools"
 			? new RichToolsBody(theme, d.version, d.empty, minRows, ctl)
