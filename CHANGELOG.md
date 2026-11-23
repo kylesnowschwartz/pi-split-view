@@ -12,6 +12,11 @@ Notable changes to `pi-split-view`. Versioning is [SemVer](https://semver.org/).
   other extensions draw in the transcript (markdown transformers, custom entries, custom
   messages) then renders and takes mouse input. The default, `messages`, is unchanged.
 
+### Removed
+
+- The one-row file summary below the editor (`📂 53  a.ts · b.ts  +50`). The Files panel
+  (`/files`) shows the same files.
+
 ### Fixed
 
 - Files a `bash` command reads now show as `s` in the Files panel when the command

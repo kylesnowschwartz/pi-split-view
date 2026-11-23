@@ -209,7 +209,6 @@ const MAX_LINES = 400;
 // so the visible paragraph re-flows once per ~8K chars, not on every flush.
 const MAX_TAIL_CHARS = 16000;
 const MAX_FILES = 500;
-const MAX_WIDGET_NAMES = 3;
 const MIN_TERM_WIDTH = 90;
 const MAX_TOOL_OUTPUT_LINES = 80;
 /** Max lines rendered in an expanded rich bash/read/write card when not zoomed. */
@@ -1251,19 +1250,6 @@ function displayPath(abs: string): string {
 	const home = homedir();
 	if (abs.startsWith(home + path.sep)) return `~${abs.slice(home.length)}`;
 	return abs;
-}
-
-function widgetLines(theme: Theme, width: number): string[] {
-	const entries = recentEntries();
-	if (entries.length === 0) return [];
-	const names = entries
-		.slice(0, MAX_WIDGET_NAMES)
-		.map((e) => path.basename(e.path));
-	const rest = entries.length - names.length;
-	let text = `📂 ${entries.length}`;
-	if (names.length) text += `  ${names.join(" · ")}`;
-	if (rest > 0) text += `  +${rest}`;
-	return [truncateToWidth(theme.fg("dim", text), width)];
 }
 
 // ─── edit-diff buffer ────────────────────────────────────────────────────────
@@ -3834,7 +3820,9 @@ export default function (pi: ExtensionAPI) {
 								(tuiRef?.terminal?.rows ?? 40) !== composedTermRows)
 						)
 							applyGeometry();
-						return widgetLines(liveTheme, width);
+						// The widget draws no rows; pi calls it on each frame, which
+						// keeps the layout checks above running.
+						return [];
 					},
 					invalidate: () => {},
 				};

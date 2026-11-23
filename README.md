@@ -46,7 +46,7 @@ transcript mode — composed as one clean layout layer over pi's native transcri
   transcript.
 - **Files panel** — right dock in fullscreen (or a passive overlay in regular mode) listing
   read/written/seen files newest-first, with a live edit-diff subpanel (hide the subpanel
-  with `/split-diff` and keep just the list); a compact status widget below the editor.
+  with `/split-diff` and keep just the list).
 - **Response-only mode** — swaps the transcript for a response-only ScrollView (user +
   assistant text, pi's own components) with a dim dashed rule between successive
   assistant answers (`/split-divider`, config `answerDivider`), reusing pi's editor
