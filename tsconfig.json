@@ -10,5 +10,5 @@
 		"skipLibCheck": true,
 		"noEmit": true
 	},
-	"files": ["split-view.ts", "layout-manager.ts", "ui-panels-config.ts", "helpers.ts", "thinking-hud.ts", "tool-highlighter.ts", "test/helpers.test.ts", "test/thinking-hud.test.ts", "test/tool-highlighter.test.ts"]
+	"files": ["split-view.ts", "layout-manager.ts", "layout-types.ts", "layout-grid.ts", "ui-panels-config.ts", "helpers.ts", "thinking-hud.ts", "tool-highlighter.ts", "test/helpers.test.ts", "test/thinking-hud.test.ts", "test/tool-highlighter.test.ts"]
 }

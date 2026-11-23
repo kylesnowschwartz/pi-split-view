@@ -151,6 +151,15 @@ import {
 	selfHealLayout,
 } from "./layout-manager.ts";
 import {
+	type LayoutContext,
+	type LayoutMode,
+	type LayoutStrategy,
+	MeasurementSafeVStack,
+	type PanelCtl,
+	type PanelId,
+} from "./layout-types.ts";
+import { GridLayoutStrategy } from "./layout-grid.ts";
+import {
 	appendStreamTail,
 	bashPathCandidates,
 	bandToolsColsFor as bandToolsColsForPct,
@@ -356,7 +365,7 @@ let layoutSlots: LayoutSlots = {
 };
 /** Panel expanded to the whole area above the editor (header ↗ button).
  * Transient: never persisted. */
-type PanelId = "thinking" | "tools" | "files" | "messages";
+// PanelId is imported from ./layout-types.ts.
 let zoomed: PanelId | null = null;
 
 const SLOT_NAMES: readonly SlotName[] = ["topLeft", "topRight", "main", "dock"];
@@ -1269,117 +1278,71 @@ const filesActive = () => isLayoutLayerActive("files") || !!REG.active;
 
 // ─── mouse: drag-resize, header buttons, wheel routing ───────────────────────
 
-/** Mouse wiring of one panel (band panel, dock, or zoomed panel). */
-interface PanelCtl {
-	id: PanelId;
-	/** Panel lives in the band (its bottom border drags the band height). */
-	inBand: boolean;
-	/** The panel's left edge column is a width-drag handle ("tools" = band
-	 * split between topLeft/topRight, "dock" = right dock width). */
-	resizeLeft: "tools" | "dock" | false;
-	/** Body ScrollView — wheel over the frame scrolls it (B3). */
-	scroll?: ScrollView;
-}
+/** Active layout mode and strategy registry. */
+let layoutMode: LayoutMode = "grid";
 
-/** Live layout entries that drags and resizes mutate in place — no tree
- * rebuild, so panel scroll positions survive. Reset on every compose. */
-const geo: {
-	bandStack?: VStack;
-	band?: Component;
-	panelStack?: HStack;
-	leftBandPanel?: Component;
-	rightBandPanel?: Component;
-	dockStack?: HStack;
-	dockPanel?: Component;
-} = {};
-
-/** Terminal width the current geometry was computed for (resize hook). */
+/** Terminal dimensions the current geometry was computed for (resize hook). */
 let composedTermCols = -1;
+let composedTermRows = -1;
 
 /** Late-bound UI access for mouse actions (set by the widget factory). */
 let themeGetter: (() => Theme) | null = null;
 let notifyFn: ((msg: string, level: "info" | "warning") => void) | null = null;
 
-function stackEntry(stack: unknown, component: Component | undefined): any {
-	if (!component) return undefined;
-	const entries = (stack as { entries?: any[] } | undefined)?.entries;
-	return entries?.find((e) => e.component === component);
+/** Grid strategy instance; owns grid geo, drag state, and band/dock composition. */
+const gridStrategy = new GridLayoutStrategy({
+	getSlots: () => layoutSlots,
+	getDockSide: () => dockSide,
+	getBandHeight: () => bandHeight,
+	setBandHeight: (h) => {
+		bandHeight = h;
+	},
+	getToolsWidthPct: () => toolsWidthPct,
+	setToolsWidthPct: (pct) => {
+		toolsWidthPct = pct;
+	},
+	getFilesWidth: () => filesWidth,
+	setFilesWidth: (w) => {
+		filesWidth = w;
+	},
+	getFlags: () => ({ thinkingOn, toolsOn, filesOn, trimResponse }),
+	getTerminalSize: () => ({
+		cols: tuiRef?.terminal?.columns ?? 120,
+		rows: tuiRef?.terminal?.rows ?? 40,
+	}),
+	dockColsFor: (cols) => dockColsFor(cols),
+	dockColsForManual: (cols, wanted) => dockColsForManual(cols, wanted),
+	bandToolsColsFor: (bandCols) => bandToolsColsFor(bandCols),
+	requestRender: () => requestRender(),
+	onUseBaseTranscript: () => {
+		const base = getBaseRoot();
+		const baseTranscript = base ? baseTranscriptOf(base) : null;
+		if (baseTranscript instanceof ScrollView) messagesScrollRef = baseTranscript;
+	},
+});
+
+const strategies: Record<LayoutMode, LayoutStrategy> = {
+	grid: gridStrategy,
+	// Step 2 replaces this with DrawersLayoutStrategy.
+	drawers: gridStrategy,
+};
+
+function activeStrategy(): LayoutStrategy {
+	return strategies[layoutMode] ?? gridStrategy;
 }
 
-/** Band width available next to the right dock. */
+/** Band width available next to a visible dock (used by FilesPanel main-slot sizing). */
 function bandBase(cols: number): number {
-	const dockVisible = layoutSlots.dock !== null && cols >= MIN_TERM_WIDTH;
-	return cols - (dockVisible ? dockColsFor(cols) : 0);
+	return gridStrategy.bandBase(cols);
 }
 
-/** Recompute dock width, band height and the topLeft|topRight split from the
- * current state and mutate the composed entries in place. */
+/** Re-apply layout geometry in place on resize or state mutation. */
 function applyGeometry(): void {
 	const cols = tuiRef?.terminal?.columns ?? 120;
+	const rows = tuiRef?.terminal?.rows ?? 40;
 	composedTermCols = cols;
-	const dockEntry = stackEntry(geo.dockStack, geo.dockPanel);
-	if (dockEntry) {
-		const w =
-			layoutSlots.dock === "messages"
-				? Math.min(dockColsFor(cols), Math.max(24, cols - 20))
-				: dockColsFor(cols);
-		dockEntry.basis = w;
-		dockEntry.minSize = w;
-	}
-	const bandEntry = stackEntry(geo.bandStack, geo.band);
-	if (bandEntry) {
-		bandEntry.basis = bandHeight;
-		bandEntry.minSize = Math.min(6, bandHeight);
-	}
-	const left = stackEntry(geo.panelStack, geo.leftBandPanel);
-	const right = stackEntry(geo.panelStack, geo.rightBandPanel);
-	if (left && right) {
-		const base = bandBase(cols);
-		const rightW = bandToolsColsFor(base);
-		left.basis = base - rightW;
-		right.basis = rightW;
-	}
-	requestRender();
-}
-
-type DragKind = "height" | "tools" | "dock";
-let drag: { kind: DragKind; x: number; y: number; start: number } | null = null;
-
-function beginDrag(kind: DragKind, ev: TuiMouseEvent): TuiMouseEventResult {
-	const cols = tuiRef?.terminal?.columns ?? 120;
-	const start =
-		kind === "height"
-			? bandHeight
-			: kind === "dock"
-				? dockColsFor(cols)
-				: bandToolsColsFor(bandBase(cols));
-	drag = { kind, x: ev.screenX, y: ev.screenY, start };
-	return { capture: true };
-}
-
-function continueDrag(ev: TuiMouseEvent): TuiMouseEventResult {
-	const d = drag;
-	if (!d || ev.type === "release") {
-		drag = null;
-		return { handled: true };
-	}
-	if (ev.type !== "drag") return { handled: true };
-	const cols = tuiRef?.terminal?.columns ?? 120;
-	if (d.kind === "height") {
-		// Never drag the band into its own auto-hide threshold (B2).
-		const rows = tuiRef?.terminal?.rows ?? 40;
-		const max = Math.max(6, Math.min(40, rows - 1 - MIN_ROWS_BELOW_BAND));
-		bandHeight = Math.max(6, Math.min(max, d.start + (ev.screenY - d.y)));
-	} else if (d.kind === "tools") {
-		const base = Math.max(1, bandBase(cols));
-		const w = d.start - (ev.screenX - d.x);
-		toolsWidthPct = Math.max(20, Math.min(80, Math.round((w * 100) / base)));
-	} else {
-		const delta = dockSide === "left" ? ev.screenX - d.x : -(ev.screenX - d.x);
-		filesWidth = dockColsForManual(cols, d.start + delta);
-	}
-	applyGeometry();
-	return { handled: true };
+	composedTermRows = rows;
+	activeStrategy().applyGeometry(cols, rows);
 }
 
 /** Header buttons occupy the 6 columns before the right corner, when the
@@ -1593,20 +1556,12 @@ function panelMouse(
 	ctl: PanelCtl | undefined,
 	where: "top" | "bottom" | "body",
 ): TuiMouseEventResult | undefined {
-	if (drag && (ev.type === "drag" || ev.type === "release")) return continueDrag(ev);
+	const strat = activeStrategy();
+	if (strat.hasActiveDrag() && (ev.type === "drag" || ev.type === "release")) {
+		return ctl?.onDragEvent?.(ev) ?? strat.handleDragEvent(ev);
+	}
 	if (!ctl) return undefined;
 	if (ev.type === "wheel") {
-		// SV-28: consume the wheel here instead of deferring the body to pi's
-		// native routing (routeWheel). That path hands whatever the panel's
-		// ScrollView did not consume to the PRIMARY scroll view — the transcript —
-		// even when the panel declares overscroll:"contain" (tui-alt-screen.js:
-		// `remaining !== 0 && !seen.has(primary)` runs regardless). So scrolling a
-		// panel to its top or bottom also scrolled the main window. Returning
-		// `handled` makes the TUI treat the wheel as consumed and skip routeWheel
-		// entirely, keeping the scroll inside this panel. A body with no
-		// ScrollView of its own (the files dock lists without one) consumes it too:
-		// doing nothing is better than scrolling the transcript from under the
-		// cursor.
 		ctl.scroll?.scrollBy(ev.wheelDelta ?? 0);
 		if (ctl.id === "messages") {
 			suppressNextPinClear = false;
@@ -1619,9 +1574,14 @@ function panelMouse(
 		if (where === "top" && buttonAt(ev)) return { capture: true };
 		if (where === "bottom" && (liveButtonAt(ev, ctl.id) || pagerHitTest(ev, ctl.id)))
 			return { capture: true };
-		if (ctl.resizeLeft && ev.x === 0)
-			return beginDrag(ctl.resizeLeft, ev);
-		if (where === "bottom" && ctl.inBand) return beginDrag("height", ev);
+		if (ev.x === 0) {
+			const edgeRes = ctl.onEdgePress?.("left", ev);
+			if (edgeRes) return edgeRes;
+		}
+		if (where === "bottom") {
+			const edgeRes = ctl.onEdgePress?.("bottom", ev);
+			if (edgeRes) return edgeRes;
+		}
 		return undefined;
 	}
 	if (ev.type === "click" && where === "top") {
@@ -1756,19 +1716,7 @@ class BorderBottom implements Component {
 	dispose(): void {}
 }
 
-/**
- * OracleSpec: a VStack whose component-level render() is a constant sentinel.
- * The layout engine checks LAYOUT_NODE before plain render (layoutComponent),
- * so real layout/painting is untouched — but the engine's DISCARDED intrinsic-
- * height measurement passes (hstack node branch) call component.render() and
- * now cost O(1) instead of eagerly rendering the whole subtree (band panels,
- * and via the dock, the full transcript) on every keystroke frame.
- */
-class MeasurementSafeVStack extends VStack {
-	render(_width: number): string[] {
-		return [""];
-	}
-}
+// MeasurementSafeVStack is imported from ./layout-types.ts.
 
 /**
  * OracleSpec body: renders the recent window with a left │ edge only — the
@@ -2812,12 +2760,12 @@ function bandDef(theme: Theme, id: "thinking" | "tools"): BandDef {
  * engine's discarded measurement passes O(1).
  */
 function framedPanel(theme: Theme, d: BandDef, ctl: PanelCtl): Component {
-	// Filler rows track the real viewport (band or zoomed), so the left edge
-	// stays continuous at any allocated height.
+	// Filler rows track the real viewport (band, drawer, or zoomed), so the left
+	// edge stays continuous at any allocated height.
 	const minRows = () =>
 		ctl.scroll?.viewportHeight ||
-		(ctl.inBand
-			? bandHeight - 2
+		(ctl.minRows
+			? ctl.minRows()
 			: Math.max(1, (tuiRef?.terminal?.rows ?? 24) - bandHeight - 2));
 	const body: Component =
 		ctl.id === "tools"
@@ -2850,22 +2798,6 @@ function framedPanel(theme: Theme, d: BandDef, ctl: PanelCtl): Component {
 		{ component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 1 },
 		{ component: new BorderBottom(theme, ctl), basis: 1, grow: 0, shrink: 0 },
 	]);
-}
-
-/** Top border of the transcript region under the band; drags the band height. */
-class BandSeparator implements Component {
-	constructor(private theme: Theme) {}
-	render(w: number): string[] {
-		const th = this.theme;
-		return [th.fg("border", "╭") + th.fg("border", "─".repeat(Math.max(0, w - 2))) + th.fg("border", "╮")];
-	}
-	handleMouse(ev: TuiMouseEvent): TuiMouseEventResult | undefined {
-		if (drag && (ev.type === "drag" || ev.type === "release")) return continueDrag(ev);
-		if (ev.type === "press" && ev.button === "left") return beginDrag("height", ev);
-		return undefined;
-	}
-	invalidate(): void {}
-	dispose(): void {}
 }
 
 function buildSlotPanel(
@@ -2918,151 +2850,12 @@ function buildSlotPanel(
 	]);
 }
 
-function buildBand(
-	theme: Theme,
-	inner: Component,
-	base: Component | null,
-): Component {
-	const slots: { slot: "topLeft" | "topRight"; id: Exclude<SlotPanel, null> }[] = [];
-	if (layoutSlots.topLeft !== null)
-		slots.push({ slot: "topLeft", id: layoutSlots.topLeft });
-	if (layoutSlots.topRight !== null)
-		slots.push({ slot: "topRight", id: layoutSlots.topRight });
-	// No enabled band slots → no band at all.
-	if (slots.length === 0) return inner;
-
-	// F/F2: explicit tunable width split (toolsWidthPct of the band base, i.e.
-	// the terminal minus a visible right dock). Single panels take the full
-	// width. applyGeometry() sets the bases and re-applies them on drags and
-	// resizes without rebuilding the tree.
-	const hasDock =
-		layoutSlots.dock !== null &&
-		tuiRef &&
-		typeof tuiRef.setLayoutRoot === "function";
-	const splitBand = slots.length === 2;
-	const panels = slots.map(({ slot, id }) =>
-		buildSlotPanel(theme, id, slot, base, {
-			id,
-			inBand: true,
-			// The boundary between the two band slots is the right panel's left edge;
-			// when the dock is on the left, the left band panel's left edge drags the dock.
-			resizeLeft:
-				splitBand && slot === "topRight"
-					? "tools"
-					: dockSide === "left" && hasDock && slot === "topLeft"
-						? "dock"
-						: false,
-		}),
-	);
-	const band = splitBand
-		? new HStack(
-				panels.map((component) => ({
-					component,
-					basis: 1,
-					grow: 0,
-					shrink: 1,
-					minSize: 1,
-				})),
-			)
-		: panels[0]!;
-	if (splitBand) {
-		geo.panelStack = band as HStack;
-		geo.leftBandPanel = panels[0];
-		geo.rightBandPanel = panels[1];
-	}
-	// B2: on short terminals hide the band instead of squeezing the main area.
-	const fits = (v: { height: number }) =>
-		v.height - bandHeight - 1 >= MIN_ROWS_BELOW_BAND;
-	const bandEntries: any[] = [
-		{
-			component: band,
-			basis: bandHeight,
-			grow: 0,
-			shrink: 1,
-			minSize: Math.min(6, bandHeight),
-			visible: fits,
-		},
-	];
-	// Framed main panels (tools, thinking, files) draw their own top border.
-	if (layoutSlots.main === "messages") {
-		bandEntries.push({
-			component: new BandSeparator(theme),
-			basis: 1,
-			grow: 0,
-			shrink: 0,
-			visible: fits,
-		});
-	}
-	bandEntries.push({ component: inner, basis: 0, grow: 1, shrink: 1, minSize: 1 });
-	const stack = new VStack(bandEntries);
-	geo.bandStack = stack;
-	geo.band = band;
-	return stack;
-}
-
-function buildFilesDock(
-	theme: Theme,
-	inner: Component,
-	base: Component | null,
-	dockId: Exclude<SlotPanel, null>,
-	editorInDock: Component | null = null,
-): Component {
-	const cols = tuiRef?.terminal?.columns ?? 120;
-	const panelCols = editorInDock
-		? Math.min(dockColsFor(cols), Math.max(24, cols - 20))
-		: dockColsFor(cols);
-	const panel = buildSlotPanel(theme, dockId, "dock", base, {
-		id: dockId,
-		inBand: false,
-		resizeLeft: dockSide === "right" ? "dock" : false,
-	});
-	const dockContainer: Component = editorInDock
-		? new MeasurementSafeVStack([
-				{ component: panel, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-				{ component: editorInDock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
-			])
-		: panel;
-	// Wrap the main subtree in a MeasurementSafeVStack — the dock HStack's
-	// discarded intrinsic-height measurement would otherwise eagerly render the
-	// ENTIRE main side (band + main) every keystroke frame. ENTRY FORM
-	// MATTERS: a bare component defaults to grow:0, and this wrapper's sentinel
-	// render measures as 1 row — a shorter-than-screen subtree would then
-	// collapse to its intrinsic height instead of stretching.
-	const mainSide = new MeasurementSafeVStack([
-		{ component: inner, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-	]);
-	const dockEntry = {
-		component: dockContainer,
-		basis: panelCols,
-		grow: 0,
-		shrink: 0,
-		minSize: panelCols,
-		// Never auto-hide the dock when it hosts Pi's prompt editor.
-		...(editorInDock
-			? {}
-			: { visible: (v: { width: number }) => v.width >= MIN_TERM_WIDTH }),
-	};
-	const mainEntry = {
-		component: mainSide,
-		basis: 0,
-		grow: 1,
-		shrink: 1,
-		minSize: 1,
-	};
-	const stack = new HStack(
-		dockSide === "left" ? [dockEntry, mainEntry] : [mainEntry, dockEntry],
-	);
-	geo.dockStack = stack;
-	geo.dockPanel = dockContainer;
-	return stack;
-}
-
-/** Whether a zoomable panel is currently placed in a slot (and composable). */
+/** Whether a zoomable panel is currently visible in the active layout strategy. */
 function panelOn(id: PanelId): boolean {
-	const slot = slotOf(id);
-	if (!slot) return false;
-	if (slot === "dock") return typeof tuiRef?.setLayoutRoot === "function";
-	return true;
+	return activeStrategy().panelVisible(
+		id,
+		typeof tuiRef?.setLayoutRoot === "function",
+	);
 }
 
 /** D1: one panel over the whole area above pi's editor dock (reused verbatim,
@@ -3071,7 +2864,7 @@ function buildZoom(theme: Theme, id: PanelId): Component | null {
 	const base = getBaseRoot();
 	const dock = base ? baseDockOf(base) : null;
 	if (!dock) return null;
-	const ctl: PanelCtl = { id, inBand: false, resizeLeft: false };
+	const ctl: PanelCtl = { id };
 	const panel =
 		id === "files"
 			? new FilesPanel(
@@ -3308,86 +3101,45 @@ function ensureResponseScrollView(theme: Theme, base: Component): ScrollView {
 	return responseScrollView;
 }
 
-/** Build the full composed layout root based on named slots. */
+/** Build the full composed layout root via the active LayoutStrategy. */
 function composeLayout(theme: Theme, inner: Component): Component {
-	// Geometry refs belong to the tree being built; drop stale ones first.
-	for (const k of Object.keys(geo) as (keyof typeof geo)[]) delete geo[k];
+	const strat = activeStrategy();
+	strat.resetGeometry();
 	toolsScroll = null;
 	thinkingBody = null;
 	messagesScrollRef = null;
-	composedTermCols = tuiRef?.terminal?.columns ?? 120;
+	const cols = tuiRef?.terminal?.columns ?? 120;
+	const rows = tuiRef?.terminal?.rows ?? 40;
+	composedTermCols = cols;
+	composedTermRows = rows;
 	if (zoomed && panelOn(zoomed)) {
 		const z = buildZoom(theme, zoomed);
 		if (z) return z;
 	}
 	const base = getBaseRoot();
 	const editorDock = base ? baseDockOf(base) : null;
-	const hasDock =
-		layoutSlots.dock !== null &&
-		tuiRef &&
-		typeof tuiRef.setLayoutRoot === "function";
-	// When Messages lives in the dock, keep Pi's prompt editor directly beneath
-	// Messages at the dock's width so conversation and input share one column.
-	const editorInDock = Boolean(
-		base && editorDock && hasDock && layoutSlots.dock === "messages",
-	);
-
-	// Build main region. When editorInDock is true, the editor moves under
-	// Messages in the dock column so the main panel gets full height.
-	let root: Component;
-	if (base && editorDock) {
-		if (!editorInDock && layoutSlots.main === "messages" && !trimResponse) {
-			const baseTranscript = baseTranscriptOf(base);
-			if (baseTranscript instanceof ScrollView) messagesScrollRef = baseTranscript;
-			root = inner;
-		} else if (layoutSlots.main !== null) {
-			const mainComp = buildSlotPanel(theme, layoutSlots.main, "main", base, {
-				id: layoutSlots.main,
-				inBand: false,
-				resizeLeft: dockSide === "left" && hasDock ? "dock" : false,
-			});
-			root = editorInDock
-				? mainComp
-				: new VStack([
-						{ component: mainComp, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-						{ component: editorDock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
-					]);
-		} else {
-			root = editorInDock
-				? new Spacer(1)
-				: new VStack([
-						{ component: new Spacer(1), basis: 0, grow: 1, shrink: 1, minSize: 1 },
-						{ component: editorDock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
-					]);
-		}
-	} else {
-		root = inner;
-	}
-
-	const wantBand =
-		layoutSlots.topLeft !== null || layoutSlots.topRight !== null;
-	if (wantBand) root = buildBand(theme, root, base);
-	if (hasDock && layoutSlots.dock !== null) {
-		root = buildFilesDock(
-			theme,
-			root,
-			base,
-			layoutSlots.dock,
-			editorInDock ? editorDock : null,
-		);
-	}
-	// Set the real bases (dock width, band height, width split) on the
-	// freshly built entries.
-	applyGeometry();
-	return root;
+	const ctx: LayoutContext = {
+		theme,
+		base,
+		inner,
+		editorDock,
+		hasFullscreenLayout: Boolean(
+			tuiRef && typeof tuiRef.setLayoutRoot === "function",
+		),
+		trimResponse,
+		cols,
+		rows,
+		buildSlotPanel: (id, slot, ctl) => buildSlotPanel(theme, id, slot, base, ctl),
+		requestRender: () => requestRender(),
+	};
+	return strat.compose(ctx);
 }
 
-/** Reconcile the single "ui" layout layer with the current panel slots/flags. */
+/** Reconcile the single "ui" layout layer with the active LayoutStrategy. */
 function reconcileLayout(theme: Theme): void {
-	drag = null;
+	activeStrategy().cancelDrag();
 	if (zoomed && !panelOn(zoomed)) zoomed = null;
-	const wantAny =
-		hasNonBareSlots() || thinkingOn || toolsOn || filesOn || trimResponse;
+	const wantAny = activeStrategy().wantsLayer();
 	if (!wantAny || !tuiRef || typeof tuiRef.setLayoutRoot !== "function") {
 		if (isLayoutLayerActive("ui")) setLayoutLayer("ui", null);
 		return;
@@ -3450,7 +3202,8 @@ export default function (pi: ExtensionAPI) {
 						if (
 							typeof tuiRef?.setLayoutRoot === "function" &&
 							isLayoutLayerActive("ui") &&
-							(tuiRef?.terminal?.columns ?? 120) !== composedTermCols
+							((tuiRef?.terminal?.columns ?? 120) !== composedTermCols ||
+								(tuiRef?.terminal?.rows ?? 40) !== composedTermRows)
 						)
 							applyGeometry();
 						return widgetLines(liveTheme, width);
@@ -3851,7 +3604,7 @@ export default function (pi: ExtensionAPI) {
 		aiRefiner.clear();
 		lastCtx = null;
 		stopToolTicker();
-		drag = null;
+		activeStrategy().cancelDrag();
 		if (startupTimer) {
 			clearTimeout(startupTimer);
 			startupTimer = null;
