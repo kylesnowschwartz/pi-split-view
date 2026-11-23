@@ -27,6 +27,7 @@ import {
 	tokenizeThinkingLine,
 	toolsPagerButtons,
 	truncateInline,
+	alignTurnSpans,
 	visibleTurnsInViewport,
 	type ThinkingPalette,
 	type TurnSpan,
@@ -795,6 +796,19 @@ test("normalizeConfig preserves regular-mode files: true when slots has no files
 		slots: { topLeft: null, topRight: null, main: "messages", dock: null },
 	});
 	assert.equal(hiddenFiles.files, false);
+});
+
+test("alignTurnSpans right-aligns post-compaction tail spans to totalTurns", () => {
+	const raw = [
+		{ turn: 1, startRow: 10, endRow: 25 },
+		{ turn: 2, startRow: 25, endRow: 40 },
+	];
+	assert.deepEqual(alignTurnSpans(raw, 2), raw);
+	assert.deepEqual(alignTurnSpans(raw, 15), [
+		{ turn: 14, startRow: 10, endRow: 25 },
+		{ turn: 15, startRow: 25, endRow: 40 },
+	]);
+	assert.deepEqual(alignTurnSpans([], 15), []);
 });
 
 test("visibleTurnsInViewport handles single, multiple, out-of-range, and empty spans", () => {

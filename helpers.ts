@@ -654,6 +654,25 @@ export interface TurnSpan {
  * If `spans` is empty, returns `[]`. If nothing overlaps, returns the first
  * turn when `scrollTop < spans[0].startRow`, else the last turn.
  */
+/**
+ * Right-align rendered turn spans against totalTurns when the visible
+ * transcript only contains a post-compaction tail of UserMessageComponents.
+ */
+export function alignTurnSpans(
+	spans: readonly TurnSpan[],
+	totalTurns: number,
+): TurnSpan[] {
+	if (spans.length === 0 || totalTurns <= spans.length) {
+		return spans.map((s) => ({ ...s }));
+	}
+	const offset = totalTurns - spans.length;
+	return spans.map((s) => ({
+		turn: s.turn + offset,
+		startRow: s.startRow,
+		endRow: s.endRow,
+	}));
+}
+
 export function visibleTurnsInViewport(
 	spans: readonly TurnSpan[],
 	scrollTop: number,

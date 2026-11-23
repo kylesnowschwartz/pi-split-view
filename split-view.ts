@@ -160,6 +160,7 @@ import {
 } from "./layout-types.ts";
 import { GridLayoutStrategy } from "./layout-grid.ts";
 import {
+	alignTurnSpans,
 	appendStreamTail,
 	bashPathCandidates,
 	bandToolsColsFor as bandToolsColsForPct,
@@ -3068,7 +3069,7 @@ class ResponseBody implements Component {
 				activeSpan.endRow = endRow;
 			}
 		}
-		messageTurnSpans = spans;
+		messageTurnSpans = alignTurnSpans(spans, currentTurn);
 		syncVisibleTurnsFromMessages(false);
 		return lines;
 	}
@@ -3400,6 +3401,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 	pi.on("session_tree", (_e, ctx) => reconstruct(ctx));
+	pi.on("session_compact", (_e, ctx) => reconstruct(ctx));
 
 	// Thinking stream.
 	pi.on("message_update", (event, ctx) => {
