@@ -71,6 +71,7 @@ class DrawerHeader implements Component {
 		const pager =
 			!st.open && this.id === "tools" ? this.ctx.pagerState?.() : undefined;
 		const showPager = Boolean(pager && pager.currentTurn > 0);
+		const glyph = st.open ? "▾" : "▸";
 		return {
 			st,
 			pager,
@@ -78,6 +79,7 @@ class DrawerHeader implements Component {
 				showPager,
 				pagerLabel: pager?.label,
 				pagerToggleText: pager ? (pager.isAll ? "[Sync]" : "[All]") : undefined,
+				leftToggleCols: visibleWidth(`${glyph} ${this.title}`),
 			}),
 		};
 	}
@@ -160,7 +162,7 @@ class DrawerHeader implements Component {
 
 		const { bar } = this.computeLayout(ev.width);
 		const isZoom = hitSpan(ev.x, bar.zoom);
-		const isToggle = hitSpan(ev.x, bar.toggle);
+		const isToggle = hitSpan(ev.x, bar.toggle) || hitSpan(ev.x, bar.leftToggle);
 		const isPrev = bar.pager ? hitSpan(ev.x, bar.pager.prev) : false;
 		const isNext = bar.pager ? hitSpan(ev.x, bar.pager.next) : false;
 		const isPagerToggle = bar.pager ? hitSpan(ev.x, bar.pager.toggle) : false;

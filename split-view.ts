@@ -720,11 +720,21 @@ function addResponseMessage(msg: any): void {
 }
 
 /** Rebuild the whole response doc from the current branch. */
+/** Read the active context entries (respecting compaction boundaries, matching
+ * Pi's interactive chatContainer), falling back to getBranch(). */
+function activeContextEntries(ctx: ExtensionContext): any[] {
+	const sm = ctx.sessionManager as any;
+	if (typeof sm?.buildContextEntries === "function") {
+		return sm.buildContextEntries();
+	}
+	return ctx.sessionManager.getBranch();
+}
+
 function rebuildResponseDoc(ctx: ExtensionContext): void {
 	responseDoc.clear();
 	streamingResponseComponent = null;
 	lastResponseRole = null;
-	const branch = ctx.sessionManager.getBranch();
+	const branch = activeContextEntries(ctx);
 	for (const entry of branch) {
 		if (entry.type !== "message") continue;
 		const msg = (entry as any).message;
@@ -3393,7 +3403,7 @@ export default function (pi: ExtensionAPI) {
 		clearEditDiff();
 		rebuildResponseDoc(ctx);
 
-		const branch = ctx.sessionManager.getBranch();
+		const branch = activeContextEntries(ctx);
 		// SV-27: the "turn" scope has to survive a restart / branch switch, so the
 		// reconstruction makes the same cut the live buffer does. Without this a
 		// resumed session would show every earlier turn until the next user

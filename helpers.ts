@@ -655,14 +655,25 @@ export interface TurnSpan {
  * turn when `scrollTop < spans[0].startRow`, else the last turn.
  */
 /**
- * Right-align rendered turn spans against totalTurns when the visible
- * transcript only contains a post-compaction tail of UserMessageComponents.
+ * Align rendered turn spans against totalTurns across compaction boundaries:
+ * - If `spans.length < totalTurns` (post-compaction tail rendered), right-align to `totalTurns`.
+ * - If `spans.length > totalTurns` (pre-compaction messages still in chatContainer while
+ *   reconstruct tracks active context entries), keep the trailing `totalTurns` spans numbered 1..totalTurns.
  */
 export function alignTurnSpans(
 	spans: readonly TurnSpan[],
 	totalTurns: number,
 ): TurnSpan[] {
-	if (spans.length === 0 || totalTurns <= spans.length) {
+	if (spans.length === 0 || totalTurns <= 0) return [];
+	if (spans.length > totalTurns) {
+		const tail = spans.slice(spans.length - totalTurns);
+		return tail.map((s, idx) => ({
+			turn: idx + 1,
+			startRow: s.startRow,
+			endRow: s.endRow,
+		}));
+	}
+	if (spans.length === totalTurns) {
 		return spans.map((s) => ({ ...s }));
 	}
 	const offset = totalTurns - spans.length;
@@ -835,6 +846,7 @@ export interface DrawerBarSpan {
 
 export interface DrawerBarLayout {
 	showButtons: boolean;
+	leftToggle: DrawerBarSpan | null;
 	zoom: DrawerBarSpan | null;
 	toggle: DrawerBarSpan | null;
 	pager: {
@@ -862,6 +874,7 @@ export function drawerBarLayout(
 		pagerLabel?: string;
 		pagerToggleText?: string;
 		minLabelCols?: number;
+		leftToggleCols?: number;
 	},
 ): DrawerBarLayout {
 	const contentWidth = Math.max(1, width - 2);
@@ -907,7 +920,10 @@ export function drawerBarLayout(
 	}
 
 	const labelRoom = Math.max(1, contentWidth - buttonsWidth - pagerWidth);
-	return { showButtons, zoom, toggle, pager, labelRoom, pagerStart };
+	const leftCols = Math.max(0, Math.min(labelRoom, opts.leftToggleCols ?? 0));
+	const leftToggle: DrawerBarSpan | null =
+		leftCols > 0 ? { start: 1, end: 1 + leftCols } : null;
+	return { showButtons, leftToggle, zoom, toggle, pager, labelRoom, pagerStart };
 }
 
 export default function (_pi: ExtensionAPI) {

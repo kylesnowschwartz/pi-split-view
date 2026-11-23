@@ -848,8 +848,10 @@ test("drawerBarLayout computes exact non-overlapping hit spans for buttons and c
 		showPager: true,
 		pagerLabel: "Turn 3/8",
 		pagerToggleText: "[All]",
+		leftToggleCols: 12,
 	});
 	assert.equal(wide.showButtons, true);
+	assert.deepEqual(wide.leftToggle, { start: 1, end: 13 });
 	assert.deepEqual(wide.zoom, { start: 93, end: 96 });
 	assert.deepEqual(wide.toggle, { start: 96, end: 99 });
 	assert.ok(wide.pager !== null);
@@ -873,15 +875,27 @@ test("drawerBarLayout computes exact non-overlapping hit spans for buttons and c
 	assert.equal(tiny.toggle, null);
 });
 
-test("alignTurnSpans right-aligns post-compaction tail spans to totalTurns", () => {
+test("alignTurnSpans aligns post-compaction spans in both directions", () => {
 	const raw = [
 		{ turn: 1, startRow: 10, endRow: 25 },
 		{ turn: 2, startRow: 25, endRow: 40 },
 	];
 	assert.deepEqual(alignTurnSpans(raw, 2), raw);
+	// Fewer rendered spans than totalTurns: right-align.
 	assert.deepEqual(alignTurnSpans(raw, 15), [
 		{ turn: 14, startRow: 10, endRow: 25 },
 		{ turn: 15, startRow: 25, endRow: 40 },
+	]);
+	// More rendered spans than totalTurns (live compaction before reload): keep trailing totalTurns renumbered 1..totalTurns.
+	const preAndPost = [
+		{ turn: 1, startRow: 0, endRow: 10 },
+		{ turn: 2, startRow: 10, endRow: 20 },
+		{ turn: 3, startRow: 20, endRow: 30 },
+		{ turn: 4, startRow: 30, endRow: 45 },
+	];
+	assert.deepEqual(alignTurnSpans(preAndPost, 2), [
+		{ turn: 1, startRow: 20, endRow: 30 },
+		{ turn: 2, startRow: 30, endRow: 45 },
 	]);
 	assert.deepEqual(alignTurnSpans([], 15), []);
 });
