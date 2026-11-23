@@ -2117,8 +2117,23 @@ class ThinkingBody implements Component {
 				? "\x1b[38;2;114;135;253m"
 				: "\x1b[38;2;180;190;254m";
 			const bulbIcon = `${lavender}\uF0EB\x1b[0m`;
+			const distinctTurns = new Set(blocks.map((b) => b.turn)).size;
+			const showTurnHeaders =
+				(activeTurns !== null && activeTurns.length > 1) ||
+				(activeTurns === null && distinctTurns > 1);
+			let lastRenderedTurn = -1;
 
 			for (const block of blocks) {
+				if (showTurnHeaders && block.turn !== lastRenderedTurn) {
+					lastRenderedTurn = block.turn;
+					const preview = turnPreviews.get(block.turn);
+					const header =
+						th.fg("dim", "── ") +
+						th.fg("accent", `Turn ${block.turn}`) +
+						(preview ? th.fg("dim", ` · ${preview}`) : "") +
+						th.fg("dim", " ──");
+					emitLine(header);
+				}
 				const rawLines = block.tail
 					? [...block.lines, block.tail]
 					: block.lines;
