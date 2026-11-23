@@ -664,9 +664,9 @@ test("isToolExpanded resolves precedence: override > zoom > global > default", (
 	const errored = { id: "t2", active: false, isError: true };
 	const clean = { id: "t3", active: false, isError: false };
 
-	// Default (globalOverride = null, not zoomed): active & error expand; clean collapses.
+	// Default (globalOverride = null, not zoomed): only active expands; completed/errored collapse.
 	assert.equal(isToolExpanded(active, empty, null), true);
-	assert.equal(isToolExpanded(errored, empty, null), true);
+	assert.equal(isToolExpanded(errored, empty, null), false);
 	assert.equal(isToolExpanded(clean, empty, null), false);
 
 	// Global "all" expands even clean completed tools.

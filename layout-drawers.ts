@@ -30,6 +30,7 @@ interface DrawerDragState {
 	id: DrawerId;
 	y: number;
 	start: number;
+	moved: boolean;
 }
 
 const DEFAULT_THINKING_HEIGHT = 10;
@@ -64,6 +65,7 @@ class DrawerHeader implements Component {
 		private readonly onBeginDrag: (ev: TuiMouseEvent) => TuiMouseEventResult,
 		private readonly onDragEvent: (ev: TuiMouseEvent) => TuiMouseEventResult | undefined,
 		private readonly hasDrag: () => boolean,
+		private readonly consumeSuppressedClick: () => boolean,
 	) {}
 
 	private computeLayout(width: number) {
@@ -94,17 +96,12 @@ class DrawerHeader implements Component {
 		};
 		const glyph = st.open ? "▾" : "▸";
 		const dot = summary.streaming ? th.fg("warning", " ●") : "";
-		const errBadge =
-			!st.open && summary.errorCount > 0
-				? " " + th.fg("error", `✗ ${summary.errorCount} err`)
-				: "";
 		const summaryText = summary.text
 			? th.fg("muted", ` (${summary.text})`)
 			: "";
 		const rawLeft =
 			th.fg(this.color, `${glyph} ${this.title}`) +
 			summaryText +
-			errBadge +
 			dot +
 			" ";
 		const left = truncateToWidth(rawLeft, bar.labelRoom);
@@ -166,15 +163,16 @@ class DrawerHeader implements Component {
 		const isPrev = bar.pager ? hitSpan(ev.x, bar.pager.prev) : false;
 		const isNext = bar.pager ? hitSpan(ev.x, bar.pager.next) : false;
 		const isPagerToggle = bar.pager ? hitSpan(ev.x, bar.pager.toggle) : false;
-		const isControl = isZoom || isToggle || isPrev || isNext || isPagerToggle;
+		const isControl = isZoom || isPrev || isNext || isPagerToggle;
 
 		if (ev.type === "press") {
-			if (isControl) return { capture: true };
-			if (!st.open) return { capture: true };
-			// Expanded header outside [↗]/[▾]: drag top border to resize drawer height.
+			if (isControl || isToggle || !st.open) return { capture: true };
+			// Expanded top border outside [↗]/pager: press-and-drag >= 1 row resizes height;
+			// releasing with 0 movement falls through to click and toggles collapse.
 			return this.onBeginDrag(ev);
 		}
 		if (ev.type === "click") {
+			if (this.consumeSuppressedClick()) return { handled: true };
 			if (isZoom) {
 				this.ctx.toggleZoom?.(this.id);
 				return { handled: true };
@@ -191,10 +189,8 @@ class DrawerHeader implements Component {
 				this.ctx.toggleToolsScopeAll?.();
 				return { handled: true };
 			}
-			if (isToggle || !st.open) {
-				this.onToggle();
-				return { handled: true };
-			}
+			this.onToggle();
+			return { handled: true };
 		}
 		return undefined;
 	}
@@ -236,6 +232,7 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 
 	private lastCtx: LayoutContext | null = null;
 	private drag: DrawerDragState | null = null;
+	private suppressNextClick = false;
 	private enabled = true;
 
 	constructor(
@@ -344,7 +341,8 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 			scroll && scroll.viewportHeight > 0
 				? scroll.viewportHeight + 2
 				: this.drawers[id].height;
-		this.drag = { id, y: ev.screenY, start: effectiveH };
+		this.suppressNextClick = false;
+		this.drag = { id, y: ev.screenY, start: effectiveH, moved: false };
 		return { capture: true };
 	}
 
@@ -352,10 +350,15 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 		const d = this.drag;
 		if (!d) return undefined;
 		if (ev.type === "release") {
+			this.suppressNextClick = d.moved;
 			this.drag = null;
 			return { handled: true };
 		}
 		if (ev.type !== "drag") return { handled: true };
+		if (!d.moved && Math.abs(ev.screenY - d.y) < 1) {
+			return { handled: true };
+		}
+		d.moved = true;
 		const { cols, rows } = this.getTerminalSize();
 		const msgVp = this.lastCtx?.getMessagesViewportHeight?.() ?? 0;
 		const dynamicMax =
@@ -431,6 +434,11 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 			(ev) => this.beginDrag(id, ev),
 			(ev) => this.handleDragEvent(ev),
 			() => this.hasActiveDrag(),
+			() => {
+				if (!this.suppressNextClick) return false;
+				this.suppressNextClick = false;
+				return true;
+			},
 		);
 		const entries: any[] = [
 			{ component: header, basis: 1, grow: 0, shrink: 0, minSize: 1 },

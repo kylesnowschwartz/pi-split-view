@@ -594,23 +594,37 @@ const thinking = {
 	},
 };
 
+function trimBlankEdgeLines(lines: readonly string[]): string[] {
+	let start = 0;
+	let end = lines.length;
+	while (start < end && lines[start]!.trim() === "") start++;
+	while (end > start && lines[end - 1]!.trim() === "") end--;
+	return lines.slice(start, end);
+}
+
 function thinkingLines(theme: Theme, width: number): string[] {
 	const out: string[] = [];
 	const sep = theme.fg("dim", "─".repeat(Math.max(8, Math.min(60, width - 3))));
 	const activeTurns = thinkingScope === "session" ? activeTurnSelection() : null;
 	for (const b of thinking.blocks) {
 		if (activeTurns !== null && !activeTurns.includes(b.turn)) continue;
-		if (out.length) out.push("");
-		out.push(sep);
-		for (const l of b.lines) out.push(l);
+		const trimmed = trimBlankEdgeLines(b.lines);
+		if (trimmed.length === 0) continue;
+		if (out.length) out.push(sep);
+		for (const l of trimmed) out.push(l);
 	}
 	if (
 		thinking.current &&
 		(activeTurns === null || activeTurns.includes(thinking.current.turn))
 	) {
-		if (out.length) out.push("");
-		for (const l of thinking.current.lines) out.push(l);
-		if (thinking.current.tail) out.push(thinking.current.tail);
+		const raw = thinking.current.tail
+			? [...thinking.current.lines, thinking.current.tail]
+			: thinking.current.lines;
+		const trimmed = trimBlankEdgeLines(raw);
+		if (trimmed.length > 0) {
+			if (out.length) out.push(sep);
+			for (const l of trimmed) out.push(l);
+		}
 	}
 	return out;
 }

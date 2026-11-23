@@ -514,7 +514,7 @@ export function isToolExpanded(
 	if (zoomedTools) return true;
 	if (globalOverride === "all") return true;
 	if (globalOverride === "none") return false;
-	return entry.active || entry.isError;
+	return entry.active;
 }
 
 export type ThinkingTokenKind =
