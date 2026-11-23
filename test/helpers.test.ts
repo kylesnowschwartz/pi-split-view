@@ -30,6 +30,7 @@ import {
 	alignTurnSpans,
 	computeDrawerHeights,
 	drawerBarLayout,
+	toolHudBadge,
 	visibleTurnsInViewport,
 	type ThinkingPalette,
 	type TurnSpan,
@@ -813,6 +814,30 @@ test("normalizeConfig preserves regular-mode files: true when slots has no files
 		slots: { topLeft: null, topRight: null, main: "messages", dock: null },
 	});
 	assert.equal(hiddenFiles.files, false);
+});
+
+test("toolHudBadge maps core tools to compact 1-cell Nerd Font glyphs and custom tools with names", () => {
+	const bash = toolHudBadge("bash", false);
+	assert.equal(bash.icon, "\u{F0BE0}");
+	assert.equal(bash.showName, false);
+	assert.ok(bash.ansiColor.includes("166;227;161"));
+
+	const edit = toolHudBadge("Edit", false);
+	assert.equal(edit.icon, "\uEE75");
+	assert.equal(edit.showName, false);
+
+	const read = toolHudBadge("read", true);
+	assert.equal(read.icon, "\uE28B");
+	assert.equal(read.showName, false);
+	assert.ok(read.ansiColor.includes("30;102;245"));
+
+	const agent = toolHudBadge("Agent", false);
+	assert.equal(agent.icon, "\u{F167A}");
+	assert.equal(agent.showName, false);
+
+	const mcp = toolHudBadge("mcp_linear_search", false);
+	assert.equal(mcp.icon, "\u{F059F}");
+	assert.equal(mcp.showName, true);
 });
 
 test("computeDrawerHeights clamps open drawers proportionally and preserves Messages/editor budget", () => {

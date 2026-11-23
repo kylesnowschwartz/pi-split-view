@@ -181,6 +181,7 @@ import {
 	outputPreview,
 	selectActiveTurns,
 	stripLeadingTrailingBlankLines,
+	toolHudBadge,
 	toolsPagerButtons,
 	truncateInline,
 	thoughtsSinceLastUser,
@@ -1996,9 +1997,15 @@ class RichToolsBody implements Component {
 	private cacheTurnsKey = "";
 	private cacheByWidth = new Map<
 		number,
-		{ rows: string[]; headerRows: Map<number, string> }
+		{
+			rows: string[];
+			headerRows: Map<number, string>;
+			bodyRows: Map<number, { id: string; startRow: number }>;
+		}
 	>();
 	private headerRows = new Map<number, string>();
+	private bodyRows = new Map<number, { id: string; startRow: number }>();
+	private pendingAnchorToolId: string | null = null;
 	private static readonly MAX_CACHED_WIDTHS = 4;
 	private imageCache = new Map<string, Image>();
 	private static readonly MAX_CACHED_IMAGES = 8;
@@ -2037,14 +2044,18 @@ class RichToolsBody implements Component {
 			this.cacheByWidth.delete(width);
 			this.cacheByWidth.set(width, cached);
 			this.headerRows = cached.headerRows;
+			this.bodyRows = cached.bodyRows;
+			this.flushPendingAnchor();
 			return cached.rows;
 		}
 
 		const edge = th.fg("border", "│");
+		const gutter = th.fg("accent", "┃");
 		const innerWidth = Math.max(10, width - 3);
 		const filler = edge + " ".repeat(Math.max(0, width - 1));
 		const rows: string[] = [];
 		const headerRows = new Map<number, string>();
+		const bodyRows = new Map<number, { id: string; startRow: number }>();
 
 		const emitLine = (content: string) => {
 			if (isRawImageLine(content)) {
@@ -2116,18 +2127,37 @@ class RichToolsBody implements Component {
 						toolExpandGlobal,
 						zoomedTools,
 					);
-					headerRows.set(rows.length, entry.id);
+					const cardStartRow = rows.length;
+					headerRows.set(cardStartRow, entry.id);
 					emitLine(this.formatHeader(entry, expanded, innerWidth));
 
 					if (!expanded) continue;
 
+					const emitCardBodyLine = (content: string) => {
+						const rowIdx = rows.length;
+						if (isRawImageLine(content)) {
+							rows.push(content);
+							bodyRows.set(rowIdx, { id: entry.id, startRow: cardStartRow });
+							return;
+						}
+						const clipped =
+							visibleWidth(content) > innerWidth
+								? truncateToWidth(content, innerWidth)
+								: content;
+						const reset = clipped.includes("\x1b[") ? "\x1b[0m" : "";
+						const padLen = Math.max(0, width - 2 - visibleWidth(clipped));
+						rows.push(edge + gutter + clipped + reset + " ".repeat(padLen));
+						bodyRows.set(rowIdx, { id: entry.id, startRow: cardStartRow });
+					};
+
+					const bodyStartLen = rows.length;
 					const lower = entry.name.toLowerCase();
 					if (lower === "bash") {
-						this.renderRichBashBody(entry, innerWidth, zoomedTools, emitLine);
+						this.renderRichBashBody(entry, innerWidth, zoomedTools, emitCardBodyLine);
 					} else if (
 						(lower === "read" || lower === "write") &&
 						!entry.image &&
-						this.renderRichCodeBody(entry, innerWidth, zoomedTools, emitLine)
+						this.renderRichCodeBody(entry, innerWidth, zoomedTools, emitCardBodyLine)
 					) {
 						// Rendered with Tree-sitter / syntax highlighting.
 					} else {
@@ -2141,28 +2171,47 @@ class RichToolsBody implements Component {
 									comp.setExpanded(true);
 								}
 								rendered = stripLeadingTrailingBlankLines(comp.render(innerWidth));
-						} catch {
-							rendered = [];
-						} finally {
-							if (!prevExpanded && canToggle) {
-								try {
-									comp.setExpanded(prevExpanded);
-								} catch {
-									/* ignore restore errors */
+							} catch {
+								rendered = [];
+							} finally {
+								if (!prevExpanded && canToggle) {
+									try {
+										comp.setExpanded(prevExpanded);
+									} catch {
+										/* ignore restore errors */
+									}
 								}
 							}
-						}
-						if (rendered.length > 0) {
-							for (const line of rendered) emitLine(line);
+							if (rendered.length > 0) {
+								for (const line of rendered) emitCardBodyLine(line);
+							} else {
+								this.renderFallbackBody(
+									entry,
+									innerWidth,
+									width,
+									zoomedTools,
+									emitCardBodyLine,
+									rows,
+								);
+							}
 						} else {
-							this.renderFallbackBody(entry, innerWidth, width, zoomedTools, emitLine, rows);
+							this.renderFallbackBody(
+								entry,
+								innerWidth,
+								width,
+								zoomedTools,
+								emitCardBodyLine,
+								rows,
+							);
 						}
-					} else {
-						this.renderFallbackBody(entry, innerWidth, width, zoomedTools, emitLine, rows);
 					}
-				}
-				// Visual separation after an expanded card.
-				rows.push(filler);
+					for (let r = bodyStartLen; r < rows.length; r++) {
+						if (!bodyRows.has(r)) {
+							bodyRows.set(r, { id: entry.id, startRow: cardStartRow });
+						}
+					}
+					// Visual separation after an expanded card.
+					rows.push(filler);
 				}
 			}
 		}
@@ -2170,12 +2219,34 @@ class RichToolsBody implements Component {
 		while (rows.length < min) rows.push(filler);
 
 		this.headerRows = headerRows;
-		this.cacheByWidth.set(width, { rows, headerRows });
+		this.bodyRows = bodyRows;
+		this.cacheByWidth.set(width, { rows, headerRows, bodyRows });
 		while (this.cacheByWidth.size > RichToolsBody.MAX_CACHED_WIDTHS) {
 			const oldest = this.cacheByWidth.keys().next().value as number;
 			this.cacheByWidth.delete(oldest);
 		}
+		this.flushPendingAnchor();
 		return rows;
+	}
+
+	private flushPendingAnchor(): void {
+		const targetId = this.pendingAnchorToolId;
+		if (!targetId) return;
+		this.pendingAnchorToolId = null;
+		let targetRow = -1;
+		for (const [row, id] of this.headerRows) {
+			if (id === targetId) {
+				targetRow = row;
+				break;
+			}
+		}
+		if (targetRow >= 0 && this.ctl?.scroll) {
+			const scroll = this.ctl.scroll;
+			queueMicrotask(() => {
+				scroll.scrollTo(targetRow);
+				requestRender();
+			});
+		}
 	}
 
 	private formatHeader(e: ToolEntry, expanded: boolean, innerWidth: number): string {
@@ -2186,7 +2257,9 @@ class RichToolsBody implements Component {
 			: e.isError
 				? th.fg("error", "✗")
 				: th.fg("success", "✓");
-		const name = th.fg("toolTitle", th.bold(e.name));
+		const hud = toolHudBadge(e.name, isLightTheme(th));
+		const iconStr = `${hud.ansiColor}${hud.icon}\x1b[0m`;
+		const nameStr = hud.showName ? ` ${th.fg("toolTitle", th.bold(e.name))}` : "";
 		const badge = e.subagent ? th.fg("muted", ` [${e.agent ?? "sub"}]`) : "";
 		let dur = "";
 		if (e.startedAt !== undefined) {
@@ -2195,7 +2268,7 @@ class RichToolsBody implements Component {
 			else if (e.active && Date.now() - e.startedAt >= 1000)
 				dur = th.fg("muted", ` ${formatDuration(Date.now() - e.startedAt, true)}`);
 		}
-		const prefix = `${caret} ${mark} ${name}${badge}${dur}`;
+		const prefix = `${caret} ${mark} ${iconStr}${nameStr}${badge}${dur}`;
 		const room = innerWidth - visibleWidth(prefix) - 1;
 		const summary = room >= 4 ? formatToolArgSummary(e.name, e.args, room) : "";
 		if (!summary) return prefix;
@@ -2532,7 +2605,9 @@ class RichToolsBody implements Component {
 		const res = panelMouse(ev, this.ctl, "body");
 		if (res) return res;
 		if (ev.button !== "left" || ev.x <= 0) return undefined;
-		if (ev.type === "press" && this.headerRows.has(ev.y)) {
+		const isHeaderHit = this.headerRows.has(ev.y);
+		const isGutterHit = ev.x <= 2 && this.bodyRows.has(ev.y);
+		if (ev.type === "press" && (isHeaderHit || isGutterHit)) {
 			return { capture: true };
 		}
 		if (ev.type === "click") {
@@ -2545,10 +2620,24 @@ class RichToolsBody implements Component {
 					toolExpandGlobal,
 					zoomed === "tools",
 				);
-				toolExpandOverrides.set(id, !currentlyExpanded);
+				const nextExpanded = !currentlyExpanded;
+				toolExpandOverrides.set(id, nextExpanded);
+				if (nextExpanded) {
+					this.pendingAnchorToolId = id;
+				}
 				toolsVersionCounter++;
 				requestRender();
 				return { handled: true };
+			}
+			if (isGutterHit) {
+				const hit = this.bodyRows.get(ev.y);
+				if (hit && toolsBy.has(hit.id)) {
+					toolExpandOverrides.set(hit.id, false);
+					this.pendingAnchorToolId = hit.id;
+					toolsVersionCounter++;
+					requestRender();
+					return { handled: true };
+				}
 			}
 		}
 		return undefined;

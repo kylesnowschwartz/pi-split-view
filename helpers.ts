@@ -926,6 +926,76 @@ export function drawerBarLayout(
 	return { showButtons, leftToggle, zoom, toggle, pager, labelRoom, pagerStart };
 }
 
+export interface ToolHudBadge {
+	/** 1-cell Nerd Font icon (matching tail-claude-mux waterfall glyphs). */
+	icon: string;
+	/** 24-bit ANSI foreground escape for Catppuccin Mocha (dark) or Latte (light). */
+	ansiColor: string;
+	/** True when the tool name should still be printed after the icon (custom/MCP tools). */
+	showName: boolean;
+}
+
+const COMPACT_ICON_TOOLS = new Set([
+	"bash",
+	"run",
+	"shell",
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"glob",
+	"edit",
+	"write",
+	"notebookedit",
+	"agent",
+	"task",
+]);
+
+/**
+ * Map a tool name to its 1-cell Nerd Font HUD badge and Catppuccin color
+ * (reusing tail-claude-mux's waterfall glyph + palette vocabulary).
+ */
+export function toolHudBadge(name: string, light = false): ToolHudBadge {
+	const lower = name.trim().toLowerCase();
+	// Catppuccin Mocha (dark) vs Latte (light) 24-bit foreground codes.
+	const blue = light ? "\x1b[38;2;30;102;245m" : "\x1b[38;2;137;180;250m";
+	const peach = light ? "\x1b[38;2;254;100;11m" : "\x1b[38;2;250;179;135m";
+	const green = light ? "\x1b[38;2;64;160;43m" : "\x1b[38;2;166;227;161m";
+	const teal = light ? "\x1b[38;2;23;146;153m" : "\x1b[38;2;148;226;213m";
+	const mauve = light ? "\x1b[38;2;136;57;239m" : "\x1b[38;2;203;166;247m";
+
+	const showName = !COMPACT_ICON_TOOLS.has(lower);
+
+	if (
+		lower === "read" ||
+		lower === "grep" ||
+		lower === "find" ||
+		lower === "ls" ||
+		lower === "glob" ||
+		lower === "search"
+	) {
+		return { icon: "\uE28B", ansiColor: blue, showName }; // nf-fae-book_open_o
+	}
+	if (lower === "edit" || lower === "write" || lower === "notebookedit") {
+		return { icon: "\uEE75", ansiColor: peach, showName }; // nf-fa-pen_nib
+	}
+	if (lower === "bash" || lower === "run" || lower === "shell") {
+		return { icon: "\u{F0BE0}", ansiColor: green, showName }; // nf-md-wrench_outline
+	}
+	if (
+		lower === "agent" ||
+		lower === "task" ||
+		lower === "sendmessage" ||
+		lower === "listpeers" ||
+		lower === "taskoutput" ||
+		lower === "taskstop" ||
+		lower === "skill"
+	) {
+		return { icon: "\u{F167A}", ansiColor: mauve, showName }; // nf-md-robot_outline
+	}
+	return { icon: "\u{F059F}", ansiColor: teal, showName }; // nf-md-web
+}
+
 export default function (_pi: ExtensionAPI) {
 	/* shared helper module, not a real extension */
 }
