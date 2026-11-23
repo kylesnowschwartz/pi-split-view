@@ -21,6 +21,7 @@ import {
 	liveTailLines,
 	outputPreview,
 	pickThinkingHeadline,
+	pickThinkingSummary,
 	selectActiveTurns,
 	stripLeadingTrailingBlankLines,
 	styleThinkingLine,
@@ -839,6 +840,32 @@ test("pickThinkingHeadline skips generic filler openers when a signal line follo
 	assert.equal(normalizeConfig({}).thinkingMode, "compact");
 	assert.equal(normalizeConfig({ thinkingMode: "full" }).thinkingMode, "full");
 	assert.equal(normalizeConfig({ thinkingMode: "bogus" as any }).thinkingMode, "compact");
+	assert.deepEqual(
+		pickThinkingSummary([
+			"**Constructing Wave 2 Features**",
+			"",
+			"Adding drawers-below and compact thinking cards.",
+			"Next step is testing.",
+		]),
+		{
+			title: "Constructing Wave 2 Features",
+			body: "Adding drawers-below and compact thinking cards. Next step is testing.",
+		},
+	);
+	assert.deepEqual(
+		pickThinkingSummary(["## Checking Alignment", "Inspecting layout-drawers.ts"]),
+		{
+			title: "Checking Alignment",
+			body: "Inspecting layout-drawers.ts",
+		},
+	);
+	assert.deepEqual(
+		pickThinkingSummary(["Let me check.", "Inspecting layout-drawers.ts now."]),
+		{
+			title: "",
+			body: "Inspecting layout-drawers.ts now.",
+		},
+	);
 });
 
 test("toolHudBadge maps core tools to compact 1-cell Nerd Font glyphs and custom tools with names", () => {

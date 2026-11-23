@@ -181,6 +181,7 @@ import {
 	liveTailLines,
 	outputPreview,
 	pickThinkingHeadline,
+	pickThinkingSummary,
 	selectActiveTurns,
 	stripLeadingTrailingBlankLines,
 	toolHudBadge,
@@ -2135,10 +2136,25 @@ class ThinkingBody implements Component {
 					4,
 					innerWidth - visibleWidth(prefix) - visibleWidth(countTag) - 1,
 				);
-				const rawHeadline =
-					pickThinkingHeadline(trimmed) ||
-					(!block.complete ? "streaming…" : "…");
-				const styledHeadline = this.style(rawHeadline);
+				const summary = pickThinkingSummary(
+					trimmed,
+					Math.max(120, headlineRoom * 2),
+				);
+				let styledHeadline: string;
+				if (summary.title) {
+					const titleStyled = th.fg("toolTitle", th.bold(summary.title));
+					if (summary.body) {
+						styledHeadline = `${titleStyled} ${this.style(summary.body)}`;
+					} else {
+						styledHeadline = titleStyled;
+					}
+				} else if (summary.body) {
+					styledHeadline = this.style(summary.body);
+				} else {
+					styledHeadline = this.style(
+						pickThinkingHeadline(trimmed) || (!block.complete ? "streaming…" : "…"),
+					);
+				}
 				const clippedHeadline =
 					visibleWidth(styledHeadline) > headlineRoom
 						? truncateToWidth(styledHeadline, headlineRoom)

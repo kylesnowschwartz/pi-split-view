@@ -1029,6 +1029,62 @@ export function pickThinkingHeadline(lines: readonly string[]): string {
 	return truncateInline(first, 120);
 }
 
+export interface ThinkingSummary {
+	/** Bold heading title (markdown ** / # stripped) when the block opens with one, else "". */
+	title: string;
+	/** Inline body preview text joining the remaining lines for the rest of the row. */
+	body: string;
+}
+
+const BOLD_HEADING_RE = /^\*\*([^*]+)\*\*$/;
+
+/**
+ * Extract a compact 1-row `{ title, body }` pair for a ThinkingBlock.
+ * - If the first non-empty line is a markdown heading (`**Title**` or `# Title`),
+ *   returns it as `title` (markers stripped) and joins subsequent lines into `body`.
+ * - Otherwise returns `title: ""` and joins the block's non-empty lines into `body`
+ *   (skipping a generic filler opener when a stronger signal line follows).
+ */
+export function pickThinkingSummary(
+	lines: readonly string[],
+	maxBodyChars = 320,
+): ThinkingSummary {
+	const nonEmpty: string[] = [];
+	for (const raw of lines) {
+		const trimmed = raw.trim();
+		if (trimmed.length > 0) nonEmpty.push(trimmed);
+	}
+	if (nonEmpty.length === 0) return { title: "", body: "" };
+
+	const first = nonEmpty[0]!;
+	const boldMatch = BOLD_HEADING_RE.exec(first);
+	const hashHeading = /^#+\s+(.+)$/.exec(first);
+	if (boldMatch || hashHeading) {
+		const title = truncateInline((boldMatch?.[1] ?? hashHeading?.[1] ?? "").trim(), 80);
+		const rest = nonEmpty.slice(1).join(" ");
+		return {
+			title,
+			body: rest ? truncateInline(rest, maxBodyChars) : "",
+		};
+	}
+
+	let startIdx = 0;
+	if (
+		nonEmpty.length > 1 &&
+		GENERIC_THINKING_OPENERS.test(first) &&
+		!SIGNAL_THINKING_LINE.test(first)
+	) {
+		for (let i = 1; i < Math.min(5, nonEmpty.length); i++) {
+			if (SIGNAL_THINKING_LINE.test(nonEmpty[i]!)) {
+				startIdx = i;
+				break;
+			}
+		}
+	}
+	const joined = nonEmpty.slice(startIdx).join(" ");
+	return { title: "", body: truncateInline(joined, maxBodyChars) };
+}
+
 export default function (_pi: ExtensionAPI) {
 	/* shared helper module, not a real extension */
 }
