@@ -28,6 +28,8 @@ import {
 	toolsPagerButtons,
 	truncateInline,
 	alignTurnSpans,
+	computeDrawerHeights,
+	drawerBarLayout,
 	visibleTurnsInViewport,
 	type ThinkingPalette,
 	type TurnSpan,
@@ -796,6 +798,64 @@ test("normalizeConfig preserves regular-mode files: true when slots has no files
 		slots: { topLeft: null, topRight: null, main: "messages", dock: null },
 	});
 	assert.equal(hiddenFiles.files, false);
+});
+
+test("computeDrawerHeights clamps open drawers proportionally and preserves Messages/editor budget", () => {
+	// Plenty of room: exact requested heights.
+	assert.deepEqual(
+		computeDrawerHeights(45, { open: true, height: 10 }, { open: true, height: 14 }),
+		{ thinking: 10, tools: 14 },
+	);
+	// Collapsed drawers always take 1 row.
+	assert.deepEqual(
+		computeDrawerHeights(45, { open: false, height: 10 }, { open: false, height: 14 }),
+		{ thinking: 1, tools: 1 },
+	);
+	// Tight terminal (28 rows -> budget 16): shrinks proportionally, sums to 16.
+	const tight = computeDrawerHeights(
+		28,
+		{ open: true, height: 12 },
+		{ open: true, height: 18 },
+	);
+	assert.equal(tight.thinking + tight.tools, 16);
+	assert.ok(tight.thinking >= 5 && tight.tools >= 5);
+	// Single open drawer on tight terminal leaves 1 row for the collapsed sibling.
+	const single = computeDrawerHeights(
+		22,
+		{ open: false, height: 10 },
+		{ open: true, height: 20 },
+	);
+	assert.deepEqual(single, { thinking: 1, tools: 9 });
+});
+
+test("drawerBarLayout computes exact non-overlapping hit spans for buttons and collapsed pager", () => {
+	const wide = drawerBarLayout(100, {
+		showPager: true,
+		pagerLabel: "Turn 3/8",
+		pagerToggleText: "[All]",
+	});
+	assert.equal(wide.showButtons, true);
+	assert.deepEqual(wide.zoom, { start: 93, end: 96 });
+	assert.deepEqual(wide.toggle, { start: 96, end: 99 });
+	assert.ok(wide.pager !== null);
+	assert.equal(wide.pager.prev.end - wide.pager.prev.start, 3);
+	assert.equal(wide.pager.next.end - wide.pager.next.start, 3);
+	assert.equal(wide.pager.toggle.end - wide.pager.toggle.start, 5);
+	// Pager ends 1 border char before zoom button.
+	assert.equal(wide.pager.toggle.end + 1, wide.zoom!.start);
+	// Narrow terminal omits pager gracefully while keeping zoom/toggle buttons.
+	const narrow = drawerBarLayout(36, {
+		showPager: true,
+		pagerLabel: "Turn 3/8",
+		pagerToggleText: "[All]",
+	});
+	assert.equal(narrow.showButtons, true);
+	assert.equal(narrow.pager, null);
+	// Very narrow omits buttons too.
+	const tiny = drawerBarLayout(14, { showPager: false });
+	assert.equal(tiny.showButtons, false);
+	assert.equal(tiny.zoom, null);
+	assert.equal(tiny.toggle, null);
 });
 
 test("alignTurnSpans right-aligns post-compaction tail spans to totalTurns", () => {

@@ -774,6 +774,142 @@ export function toolsPagerButtons(
 	return { prev, next, toggle, label: displayLabel, fillCols };
 }
 
+export interface DrawerHeightInput {
+	open: boolean;
+	height: number;
+}
+
+export interface DrawerHeightResult {
+	thinking: number;
+	tools: number;
+}
+
+/**
+ * Clamp expanded drawer heights so Messages always keeps at least `minMessages`
+ * rows and the editor keeps at least `editorReserve` rows.
+ */
+export function computeDrawerHeights(
+	rows: number,
+	thinking: DrawerHeightInput,
+	tools: DrawerHeightInput,
+	minMessages = 6,
+	editorReserve = 6,
+	minOpenHeight = 5,
+): DrawerHeightResult {
+	const tReq = thinking.open
+		? Math.max(minOpenHeight, Math.min(30, thinking.height))
+		: 1;
+	const uReq = tools.open
+		? Math.max(minOpenHeight, Math.min(30, tools.height))
+		: 1;
+	const budget = Math.max(2, rows - minMessages - editorReserve);
+	if (tReq + uReq <= budget) {
+		return { thinking: tReq, tools: uReq };
+	}
+	if (thinking.open && tools.open) {
+		const minBoth = minOpenHeight * 2;
+		if (budget <= minBoth) {
+			const half = Math.max(1, Math.floor(budget / 2));
+			return { thinking: half, tools: Math.max(1, budget - half) };
+		}
+		const ratio = tReq / (tReq + uReq);
+		const tH = Math.max(
+			minOpenHeight,
+			Math.min(budget - minOpenHeight, Math.round(budget * ratio)),
+		);
+		return { thinking: tH, tools: Math.max(minOpenHeight, budget - tH) };
+	}
+	if (thinking.open) {
+		return { thinking: Math.max(1, Math.min(tReq, budget - 1)), tools: 1 };
+	}
+	if (tools.open) {
+		return { thinking: 1, tools: Math.max(1, Math.min(uReq, budget - 1)) };
+	}
+	return { thinking: 1, tools: 1 };
+}
+
+export interface DrawerBarSpan {
+	start: number;
+	end: number;
+}
+
+export interface DrawerBarLayout {
+	showButtons: boolean;
+	zoom: DrawerBarSpan | null;
+	toggle: DrawerBarSpan | null;
+	pager: {
+		prev: DrawerBarSpan;
+		next: DrawerBarSpan;
+		toggle: DrawerBarSpan;
+		label: string;
+		toggleText: string;
+	} | null;
+	/** Columns available for the left title + summary text (between ╭ and fill). */
+	labelRoom: number;
+	/** Column where the pager starts (or null if no pager). */
+	pagerStart: number | null;
+}
+
+/**
+ * Pure column geometry for a 1-row DrawerHeader (shared by render and mouse
+ * hit-testing so click targets always match painted cells).
+ * Layout: `╭<label>─…─[◀] <pagerLabel> [▶]─[All]─[↗][▸]╮`
+ */
+export function drawerBarLayout(
+	width: number,
+	opts: {
+		showPager: boolean;
+		pagerLabel?: string;
+		pagerToggleText?: string;
+		minLabelCols?: number;
+	},
+): DrawerBarLayout {
+	const contentWidth = Math.max(1, width - 2);
+	const showButtons = contentWidth >= 16;
+	const zoom: DrawerBarSpan | null = showButtons
+		? { start: width - 7, end: width - 4 }
+		: null;
+	const toggle: DrawerBarSpan | null = showButtons
+		? { start: width - 4, end: width - 1 }
+		: null;
+	const buttonsWidth = showButtons ? 6 : 0;
+
+	let pager: DrawerBarLayout["pager"] = null;
+	let pagerStart: number | null = null;
+	let pagerWidth = 0;
+
+	if (opts.showPager && opts.pagerLabel && opts.pagerToggleText) {
+		const labelText = ` ${opts.pagerLabel} `;
+		const toggleText = opts.pagerToggleText;
+		// `[◀]`(3) + labelText + `[▶]`(3) + `─`(1) + toggleText + `─`(1)
+		const needed = 3 + labelText.length + 3 + 1 + toggleText.length + 1;
+		const minLabel = opts.minLabelCols ?? 18;
+		if (contentWidth - buttonsWidth - needed >= minLabel) {
+			pagerWidth = needed;
+			const start = width - 1 - buttonsWidth - needed;
+			pagerStart = start;
+			const prev: DrawerBarSpan = { start, end: start + 3 };
+			const nextStart = prev.end + labelText.length;
+			const next: DrawerBarSpan = { start: nextStart, end: nextStart + 3 };
+			const toggleStart = next.end + 1;
+			const pToggle: DrawerBarSpan = {
+				start: toggleStart,
+				end: toggleStart + toggleText.length,
+			};
+			pager = {
+				prev,
+				next,
+				toggle: pToggle,
+				label: opts.pagerLabel,
+				toggleText,
+			};
+		}
+	}
+
+	const labelRoom = Math.max(1, contentWidth - buttonsWidth - pagerWidth);
+	return { showButtons, zoom, toggle, pager, labelRoom, pagerStart };
+}
+
 export default function (_pi: ExtensionAPI) {
 	/* shared helper module, not a real extension */
 }
