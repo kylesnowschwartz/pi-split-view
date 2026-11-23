@@ -299,19 +299,6 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 		return this.enabled;
 	}
 
-	onTurnStart(): void {
-		// Preserve manual collapse/expand choices for the entire session.
-		// Only auto-managed drawers reset to collapsed until activity starts.
-		if (!this.drawers.thinking.manualPin) {
-			this.drawers.thinking.open = false;
-		}
-		if (!this.drawers.tools.manualPin) {
-			this.drawers.tools.open = false;
-		}
-		const { cols, rows } = this.getTerminalSize();
-		this.applyGeometry(cols, rows);
-	}
-
 	onReconstruct(): void {
 		this.drawers.thinking.manualPin = false;
 		this.drawers.thinking.open = false;

@@ -22,6 +22,9 @@ Notable changes to `pi-split-view`. Versioning is [SemVer](https://semver.org/).
 - Files a `bash` command reads now show as `s` in the Files panel when the command
   changes directory first (`cd dir && cat file`), names a path under `~`, or names it
   through a variable set by a `name=value` assignment or a `for name in …` loop.
+- In the drawers layout, an open Thinking or Tool Usage drawer stays open at its height
+  when a prompt is submitted. A new turn closed each drawer that was not toggled by hand,
+  and the first thinking block or tool call opened it again.
 
 ## [1.5.0] — 2026-11-12
 

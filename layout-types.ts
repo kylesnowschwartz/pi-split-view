@@ -97,7 +97,6 @@ export interface LayoutStrategy {
 	handleDragEvent(ev: TuiMouseEvent): TuiMouseEventResult | undefined;
 	cancelDrag(): void;
 	resetGeometry(): void;
-	onTurnStart?(): void;
 	onThinkingStart?(): void;
 	onToolStart?(isError?: boolean): void;
 	onReconstruct?(): void;

@@ -4066,7 +4066,6 @@ export default function (pi: ExtensionAPI) {
 				if (thinkingScope === "turn") {
 					thinking.reset();
 				}
-				activeStrategy().onTurnStart?.();
 				addResponseMessage(msg);
 			}
 		}
