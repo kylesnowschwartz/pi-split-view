@@ -20,6 +20,7 @@ import {
 	lastImageBlock,
 	liveTailLines,
 	outputPreview,
+	pickThinkingHeadline,
 	selectActiveTurns,
 	stripLeadingTrailingBlankLines,
 	styleThinkingLine,
@@ -458,10 +459,11 @@ test("normalizeConfig: explicit slots normalize, deduplicate, and sync flags", (
 	assert.equal(allBad.files, false);
 });
 
-test("LAYOUT_PRESETS: all 7 presets exist and normalize cleanly", () => {
+test("LAYOUT_PRESETS: all 8 presets exist and normalize cleanly", () => {
 	const names: PresetName[] = [
 		"chat-left",
 		"drawers",
+		"drawers-below",
 		"classic",
 		"workbench",
 		"sidebar-chat",
@@ -814,6 +816,29 @@ test("normalizeConfig preserves regular-mode files: true when slots has no files
 		slots: { topLeft: null, topRight: null, main: "messages", dock: null },
 	});
 	assert.equal(hiddenFiles.files, false);
+});
+
+test("pickThinkingHeadline skips generic filler openers when a signal line follows", () => {
+	assert.equal(
+		pickThinkingHeadline([
+			"",
+			"Let me check the files.",
+			"Inspecting layout-drawers.ts for the drag threshold.",
+		]),
+		"Inspecting layout-drawers.ts for the drag threshold.",
+	);
+	assert.equal(
+		pickThinkingHeadline(["Fixing `alignTurnSpans` across compaction boundary"]),
+		"Fixing `alignTurnSpans` across compaction boundary",
+	);
+	assert.equal(
+		pickThinkingHeadline(["Let me think about this carefully."]),
+		"Let me think about this carefully.",
+	);
+	assert.equal(pickThinkingHeadline(["", "   "]), "");
+	assert.equal(normalizeConfig({}).thinkingMode, "compact");
+	assert.equal(normalizeConfig({ thinkingMode: "full" }).thinkingMode, "full");
+	assert.equal(normalizeConfig({ thinkingMode: "bogus" as any }).thinkingMode, "compact");
 });
 
 test("toolHudBadge maps core tools to compact 1-cell Nerd Font glyphs and custom tools with names", () => {

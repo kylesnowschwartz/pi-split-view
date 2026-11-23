@@ -19,6 +19,7 @@ import {
 } from "./layout-types.ts";
 
 export type DrawerId = "thinking" | "tools";
+export type DrawerPosition = "above" | "below";
 
 export interface DrawerState {
 	open: boolean;
@@ -233,12 +234,21 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 	private lastCtx: LayoutContext | null = null;
 	private drag: DrawerDragState | null = null;
 	private suppressNextClick = false;
+	private position: DrawerPosition = "above";
 	private enabled = true;
 
 	constructor(
 		private readonly getTerminalSize: () => { cols: number; rows: number },
 		private readonly requestRender: () => void,
 	) {}
+
+	getPosition(): DrawerPosition {
+		return this.position;
+	}
+
+	setPosition(pos: DrawerPosition): void {
+		this.position = pos;
+	}
 
 	setEnabled(on: boolean): void {
 		this.enabled = on;
@@ -478,14 +488,7 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 		const toolsBuilt = this.buildDrawer("tools", "Tool Usage", "muted", ctx);
 
 		const fits = (v: { height: number }) => v.height >= MIN_TERM_ROWS_FOR_DRAWERS;
-		const entries: any[] = [
-			{
-				component: msgComp,
-				basis: 0,
-				grow: 1,
-				shrink: 0,
-				minSize: MIN_MESSAGES_ROWS,
-			},
+		const drawerEntries: any[] = [
 			{
 				component: thinkBuilt.drawer,
 				basis: this.drawers.thinking.open ? this.drawers.thinking.height : 1,
@@ -503,14 +506,31 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 				visible: fits,
 			},
 		];
-		if (ctx.editorDock) {
-			entries.push({
-				component: ctx.editorDock,
-				basis: "auto",
-				grow: 0,
+		const editorEntry = ctx.editorDock
+			? {
+					component: ctx.editorDock,
+					basis: "auto",
+					grow: 0,
+					shrink: 0,
+					minSize: 1,
+				}
+			: null;
+
+		const entries: any[] = [
+			{
+				component: msgComp,
+				basis: 0,
+				grow: 1,
 				shrink: 0,
-				minSize: 1,
-			});
+				minSize: MIN_MESSAGES_ROWS,
+			},
+		];
+		if (this.position === "below") {
+			if (editorEntry) entries.push(editorEntry);
+			entries.push(...drawerEntries);
+		} else {
+			entries.push(...drawerEntries);
+			if (editorEntry) entries.push(editorEntry);
 		}
 
 		const stack = new VStack(entries);
@@ -525,6 +545,7 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 
 	serialize(): Record<string, unknown> {
 		return {
+			position: this.position,
 			thinking: {
 				open: this.drawers.thinking.open,
 				height: this.drawers.thinking.height,
@@ -539,6 +560,7 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 	hydrate(raw: unknown): void {
 		if (!raw || typeof raw !== "object") return;
 		const obj = raw as Record<string, unknown>;
+		this.position = obj.position === "below" ? "below" : "above";
 		for (const id of ["thinking", "tools"] as const) {
 			const item = obj[id];
 			if (!item || typeof item !== "object") continue;

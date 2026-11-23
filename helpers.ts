@@ -996,6 +996,39 @@ export function toolHudBadge(name: string, light = false): ToolHudBadge {
 	return { icon: "\u{F059F}", ansiColor: teal, showName }; // nf-md-web
 }
 
+const GENERIC_THINKING_OPENERS =
+	/^(?:let me|let's|okay|ok\b|alright|sure\b|hmm+|wait\b|now\b|so\b|well\b|first\b|next\b|good\b|great\b|nice\b|right\b|interesting\b)/i;
+const SIGNAL_THINKING_LINE =
+	/(?:[a-zA-Z0-9_.-]+\.(?:ts|tsx|js|jsx|go|rb|py|md|json|sh)\b|`[^`]+`|\b[a-z][a-zA-Z0-9]*\([^)]*\)|->|=>|\b(?:fix|bug|error|fail|however|instead|actually|need to|should|because)\b)/i;
+
+/**
+ * Pick a compact 1-line headline for a ThinkingBlock.
+ * Prefers the first non-empty line, but if it starts with generic filler
+ * ("Let me check...", "Okay, ...") and a stronger signal line appears within
+ * the first 5 non-empty lines, returns that signal line instead.
+ */
+export function pickThinkingHeadline(lines: readonly string[]): string {
+	const nonEmpty: string[] = [];
+	for (const raw of lines) {
+		const trimmed = raw.trim().replace(/^#+\s*/, "").replace(/^[-*•]\s+/, "");
+		if (trimmed.length > 0) {
+			nonEmpty.push(trimmed);
+			if (nonEmpty.length >= 5) break;
+		}
+	}
+	if (nonEmpty.length === 0) return "";
+	const first = nonEmpty[0]!;
+	if (!GENERIC_THINKING_OPENERS.test(first) || SIGNAL_THINKING_LINE.test(first)) {
+		return truncateInline(first, 120);
+	}
+	for (let i = 1; i < nonEmpty.length; i++) {
+		if (SIGNAL_THINKING_LINE.test(nonEmpty[i]!)) {
+			return truncateInline(nonEmpty[i]!, 120);
+		}
+	}
+	return truncateInline(first, 120);
+}
+
 export default function (_pi: ExtensionAPI) {
 	/* shared helper module, not a real extension */
 }

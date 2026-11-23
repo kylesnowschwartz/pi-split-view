@@ -28,6 +28,7 @@ export type ToolMode = "compact" | "full";
  * message); "session" = accumulate every turn until MAX_LINES pushes the
  * oldest rows out. */
 export type ThinkingScope = "turn" | "session";
+export type ThinkingMode = "compact" | "full";
 export type ThinkingHudMode = "ai" | "local" | "off";
 export type ResponseSource = "messages" | "transcript";
 export type SlotName = "topLeft" | "topRight" | "main" | "dock";
@@ -38,6 +39,7 @@ export type LayoutModeCfg = "grid" | "drawers";
 export type PresetName =
 	| "chat-left"
 	| "drawers"
+	| "drawers-below"
 	| "workbench"
 	| "sidebar-chat"
 	| "classic"
@@ -80,6 +82,24 @@ export const LAYOUT_PRESETS: Record<PresetName, LayoutPreset> = {
 		filesWidth: null,
 		layoutMode: "drawers",
 		layoutState: {
+			position: "above",
+			thinking: { open: false, height: 10 },
+			tools: { open: false, height: 14 },
+		},
+	},
+	"drawers-below": {
+		slots: {
+			topLeft: null,
+			topRight: null,
+			main: "messages",
+			dock: null,
+		},
+		bandHeight: 13,
+		toolsWidthPct: 50,
+		filesWidth: null,
+		layoutMode: "drawers",
+		layoutState: {
+			position: "below",
 			thinking: { open: false, height: 10 },
 			tools: { open: false, height: 14 },
 		},
@@ -175,6 +195,9 @@ export interface UiPanelsConfig {
 	/** Thinking panel buffer scope. Defaults to "session" (accumulate, the
 	 * pre-SV-27 behaviour) when absent. */
 	thinkingScope?: ThinkingScope;
+	/** Thinking panel view mode: "compact" (collapsible 1-line-per-block cards)
+	 * or "full" (continuous prose). Defaults to "compact". */
+	thinkingMode?: ThinkingMode;
 	/** Inline semantic keyword highlighting in the Thinking panel. Defaults to
 	 * true when absent. Kept for backward compatibility with thinkingHudMode. */
 	thinkingHud?: boolean;
@@ -246,6 +269,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 	toolMode: ToolMode;
 	toolsScope: ToolsScope;
 	thinkingScope: ThinkingScope;
+	thinkingMode: ThinkingMode;
 	thinkingHud: boolean;
 	thinkingHudMode: ThinkingHudMode;
 	trimResponse: boolean;
@@ -381,6 +405,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		// SV-27: strict read — only the literal "turn" opts in; anything else
 		// falls back to the "session" default, preserving the original behaviour.
 		thinkingScope: root.thinkingScope === "turn" ? "turn" : "session",
+		thinkingMode: root.thinkingMode === "full" ? "full" : "compact",
 		thinkingHud: thinkingHudMode !== "off",
 		thinkingHudMode,
 		trimResponse: boolOr(root.trimResponse, false),

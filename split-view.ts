@@ -126,6 +126,7 @@ import {
 	type DockSide,
 	type ToolMode as ToolModeCfg,
 	type ThinkingScope,
+	type ThinkingMode,
 	type ThinkingHudMode,
 	type ResponseSource,
 } from "./ui-panels-config.ts";
@@ -179,6 +180,7 @@ import {
 	lastImageBlock,
 	liveTailLines,
 	outputPreview,
+	pickThinkingHeadline,
 	selectActiveTurns,
 	stripLeadingTrailingBlankLines,
 	toolHudBadge,
@@ -270,6 +272,9 @@ let thinkingOn = true;
  * turn (default, the pre-SV-27 behaviour). Session-local;
  * /split-thinking-scope, persisted by /split-save. */
 let thinkingScope: ThinkingScope = "session";
+let thinkingMode: ThinkingMode = "compact";
+const thinkingExpandOverrides = new Map<number, boolean>();
+let nextThinkingBlockId = 1;
 /** Two-tier semantic HUD mode for the Thinking panel ("ai" | "local" | "off").
  * Session-local; /split-thinking-hud, persisted by /split-save. */
 let thinkingHudMode: ThinkingHudMode = "ai";
@@ -348,7 +353,7 @@ let liveToolId: string | null = null;
 let toolsScroll: ScrollView | null = null;
 /** The thinking panel's RecentBody (band or zoomed; set on compose), so
  * toggling /split-thinking-hud can invalidate its per-line wrap memo immediately. */
-let thinkingBody: RecentBody | null = null;
+let thinkingBody: { invalidate(): void } | null = null;
 /** Panel C: response-only view instead of pi's transcript (persisted). */
 let trimResponse = false;
 /** Top band height in rows (6–40, persisted; /split-height). */
@@ -423,6 +428,7 @@ function themeFingerprint(theme: Theme): string {
 // ─── thinking buffer ─────────────────────────────────────────────────────────
 
 interface ThinkingBlock {
+	id: number;
 	lines: string[];
 	tail: string;
 	complete: boolean;
@@ -497,13 +503,25 @@ const thinking = {
 			this.current.complete = true;
 			this.blocks.push(this.current);
 		}
-		this.current = { lines: [], tail: "", complete: false, turn: Math.max(1, currentTurn) };
+		this.current = {
+			id: nextThinkingBlockId++,
+			lines: [],
+			tail: "",
+			complete: false,
+			turn: Math.max(1, currentTurn),
+		};
 		this.streaming = true;
 		this.version++;
 	},
 	append(delta: string) {
 		if (!this.current)
-			this.current = { lines: [], tail: "", complete: false, turn: Math.max(1, currentTurn) };
+			this.current = {
+				id: nextThinkingBlockId++,
+				lines: [],
+				tail: "",
+				complete: false,
+				turn: Math.max(1, currentTurn),
+			};
 		// Split complete lines first, then cap the tail (half-drop on overflow).
 		const before = this.current.lines.length;
 		this.current.tail = appendStreamTail(
@@ -1961,6 +1979,292 @@ class RecentBody implements Component {
 	dispose(): void {}
 }
 
+/**
+ * Thinking panel body: delegates to RecentBody in "full" mode, and renders
+ * collapsible 1-line-per-block HUD cards with anchor-on-expand and an accent
+ * ┃ left-gutter collapse rail in "compact" mode (matching RichToolsBody).
+ */
+class ThinkingBody implements Component {
+	private readonly fullBody: RecentBody;
+	private cacheVersion = -1;
+	private cacheMinRows = -1;
+	private cacheZoomed = false;
+	private cacheTurnsKey = "";
+	private cacheMode: ThinkingMode = "compact";
+	private cacheByWidth = new Map<
+		number,
+		{
+			rows: string[];
+			headerRows: Map<number, number>;
+			bodyRows: Map<number, { id: number; startRow: number }>;
+		}
+	>();
+	private headerRows = new Map<number, number>();
+	private bodyRows = new Map<number, { id: number; startRow: number }>();
+	private pendingAnchorBlockId: number | null = null;
+	private static readonly MAX_CACHED_WIDTHS = 4;
+
+	constructor(
+		private theme: Theme,
+		private style: (line: string) => string,
+		lines: (w: number) => BodyItem[],
+		private version: () => number,
+		private empty: string,
+		private minRows: () => number,
+		private ctl?: PanelCtl,
+		windowed = true,
+	) {
+		this.fullBody = new RecentBody(
+			theme,
+			style,
+			lines,
+			version,
+			empty,
+			minRows,
+			ctl,
+			windowed,
+		);
+	}
+
+	private activeBlocks(): ThinkingBlock[] {
+		const activeTurns = thinkingScope === "session" ? activeTurnSelection() : null;
+		const out: ThinkingBlock[] = [];
+		for (const b of thinking.blocks) {
+			if (activeTurns !== null && !activeTurns.includes(b.turn)) continue;
+			if (trimBlankEdgeLines(b.lines).length === 0) continue;
+			out.push(b);
+		}
+		if (
+			thinking.current &&
+			(activeTurns === null || activeTurns.includes(thinking.current.turn))
+		) {
+			const raw = thinking.current.tail
+				? [...thinking.current.lines, thinking.current.tail]
+				: thinking.current.lines;
+			if (trimBlankEdgeLines(raw).length > 0 || thinking.streaming) {
+				out.push(thinking.current);
+			}
+		}
+		return out;
+	}
+
+	private isBlockExpanded(block: ThinkingBlock, zoomedThinking: boolean): boolean {
+		if (thinkingExpandOverrides.has(block.id)) {
+			return thinkingExpandOverrides.get(block.id)!;
+		}
+		if (zoomedThinking) return true;
+		return !block.complete;
+	}
+
+	render(width: number): string[] {
+		if (thinkingMode === "full") {
+			return this.fullBody.render(width);
+		}
+		const th = this.theme;
+		const v = this.version();
+		const min = Math.max(1, this.minRows());
+		const zoomedThinking = zoomed === "thinking";
+		const activeTurns = thinkingScope === "session" ? activeTurnSelection() : null;
+		const turnsKey = activeTurns === null ? "all" : activeTurns.join(",");
+		if (
+			v !== this.cacheVersion ||
+			min !== this.cacheMinRows ||
+			zoomedThinking !== this.cacheZoomed ||
+			turnsKey !== this.cacheTurnsKey ||
+			thinkingMode !== this.cacheMode
+		) {
+			this.cacheVersion = v;
+			this.cacheMinRows = min;
+			this.cacheZoomed = zoomedThinking;
+			this.cacheTurnsKey = turnsKey;
+			this.cacheMode = thinkingMode;
+			this.cacheByWidth.clear();
+		}
+		const cached = this.cacheByWidth.get(width);
+		if (cached) {
+			this.cacheByWidth.delete(width);
+			this.cacheByWidth.set(width, cached);
+			this.headerRows = cached.headerRows;
+			this.bodyRows = cached.bodyRows;
+			this.flushPendingAnchor();
+			return cached.rows;
+		}
+
+		const edge = th.fg("border", "│");
+		const gutter = th.fg("accent", "┃");
+		const innerWidth = Math.max(10, width - 3);
+		const filler = edge + " ".repeat(Math.max(0, width - 1));
+		const rows: string[] = [];
+		const headerRows = new Map<number, number>();
+		const bodyRows = new Map<number, { id: number; startRow: number }>();
+
+		const emitLine = (content: string) => {
+			const clipped =
+				visibleWidth(content) > innerWidth
+					? truncateToWidth(content, innerWidth)
+					: content;
+			const reset = clipped.includes("\x1b[") ? "\x1b[0m" : "";
+			const padLen = Math.max(0, width - 2 - visibleWidth(clipped));
+			rows.push(edge + " " + clipped + reset + " ".repeat(padLen));
+		};
+
+		const blocks = this.activeBlocks();
+		if (blocks.length === 0) {
+			emitLine(th.fg("dim", this.empty));
+		} else {
+			const lavender = isLightTheme(th)
+				? "\x1b[38;2;114;135;253m"
+				: "\x1b[38;2;180;190;254m";
+			const bulbIcon = `${lavender}\uF0EB\x1b[0m`;
+
+			for (const block of blocks) {
+				const rawLines = block.tail
+					? [...block.lines, block.tail]
+					: block.lines;
+				const trimmed = trimBlankEdgeLines(rawLines);
+				const expanded = this.isBlockExpanded(block, zoomedThinking);
+				const cardStartRow = rows.length;
+				headerRows.set(cardStartRow, block.id);
+
+				const caret = th.fg("muted", expanded ? "▾" : "▸");
+				const streamMark = !block.complete ? th.fg("warning", " ⟳") : "";
+				const countTag =
+					trimmed.length > 0 ? th.fg("dim", ` (${trimmed.length}L)`) : "";
+				const prefix = `${caret} ${bulbIcon}${streamMark}`;
+				const headlineRoom = Math.max(
+					4,
+					innerWidth - visibleWidth(prefix) - visibleWidth(countTag) - 1,
+				);
+				const rawHeadline =
+					pickThinkingHeadline(trimmed) ||
+					(!block.complete ? "streaming…" : "…");
+				const styledHeadline = this.style(rawHeadline);
+				const clippedHeadline =
+					visibleWidth(styledHeadline) > headlineRoom
+						? truncateToWidth(styledHeadline, headlineRoom)
+						: styledHeadline;
+				const gap = Math.max(
+					1,
+					innerWidth -
+						visibleWidth(prefix) -
+						1 -
+						visibleWidth(clippedHeadline) -
+						visibleWidth(countTag),
+				);
+				emitLine(
+					`${prefix} ${clippedHeadline}${" ".repeat(gap)}${countTag}`,
+				);
+
+				if (!expanded) continue;
+
+				const bodyWidth = Math.max(8, innerWidth - 1);
+				for (const line of trimmed) {
+					const styled = this.style(capDisplayLine(line, MAX_LINE_CHARS));
+					const wrapped = wrapTextWithAnsi(styled, bodyWidth);
+					for (const w of wrapped.length > 0 ? wrapped : [""]) {
+						const rowIdx = rows.length;
+						const clipped =
+							visibleWidth(w) > bodyWidth
+								? truncateToWidth(w, bodyWidth)
+								: w;
+						const reset = clipped.includes("\x1b[") ? "\x1b[0m" : "";
+						const padLen = Math.max(
+							0,
+							width - 3 - visibleWidth(clipped),
+						);
+						rows.push(
+							edge + gutter + " " + clipped + reset + " ".repeat(padLen),
+						);
+						bodyRows.set(rowIdx, { id: block.id, startRow: cardStartRow });
+					}
+				}
+			}
+		}
+
+		while (rows.length < min) rows.push(filler);
+
+		this.headerRows = headerRows;
+		this.bodyRows = bodyRows;
+		this.cacheByWidth.set(width, { rows, headerRows, bodyRows });
+		while (this.cacheByWidth.size > ThinkingBody.MAX_CACHED_WIDTHS) {
+			const oldest = this.cacheByWidth.keys().next().value as number;
+			this.cacheByWidth.delete(oldest);
+		}
+		this.flushPendingAnchor();
+		return rows;
+	}
+
+	private flushPendingAnchor(): void {
+		const targetId = this.pendingAnchorBlockId;
+		if (targetId === null) return;
+		this.pendingAnchorBlockId = null;
+		let targetRow = -1;
+		for (const [row, id] of this.headerRows) {
+			if (id === targetId) {
+				targetRow = row;
+				break;
+			}
+		}
+		if (targetRow >= 0 && this.ctl?.scroll) {
+			const scroll = this.ctl.scroll;
+			queueMicrotask(() => {
+				scroll.scrollTo(targetRow);
+				requestRender();
+			});
+		}
+	}
+
+	handleMouse(ev: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (thinkingMode === "full") {
+			return this.fullBody.handleMouse(ev);
+		}
+		const res = panelMouse(ev, this.ctl, "body");
+		if (res) return res;
+		if (ev.button !== "left" || ev.x <= 0) return undefined;
+		const isHeaderHit = this.headerRows.has(ev.y);
+		const isGutterHit = ev.x <= 2 && this.bodyRows.has(ev.y);
+		if (ev.type === "press" && (isHeaderHit || isGutterHit)) {
+			return { capture: true };
+		}
+		if (ev.type === "click") {
+			const blockId = this.headerRows.get(ev.y);
+			if (blockId !== undefined) {
+				const block = this.activeBlocks().find((b) => b.id === blockId);
+				if (block) {
+					const cur = this.isBlockExpanded(block, zoomed === "thinking");
+					const next = !cur;
+					thinkingExpandOverrides.set(blockId, next);
+					if (next) this.pendingAnchorBlockId = blockId;
+					thinking.version++;
+					requestRender();
+					return { handled: true };
+				}
+			}
+			if (isGutterHit) {
+				const hit = this.bodyRows.get(ev.y);
+				if (hit) {
+					thinkingExpandOverrides.set(hit.id, false);
+					this.pendingAnchorBlockId = hit.id;
+					thinking.version++;
+					requestRender();
+					return { handled: true };
+				}
+			}
+		}
+		return undefined;
+	}
+
+	invalidate(): void {
+		this.cacheVersion = -1;
+		this.cacheByWidth.clear();
+		this.fullBody.invalidate();
+	}
+
+	dispose(): void {
+		this.fullBody.dispose();
+	}
+}
+
 /** True if a line contains a Kitty or iTerm2 inline-image escape sequence. */
 function isRawImageLine(line: string): boolean {
 	return line.includes("\x1b_G") || line.includes("\x1b]1337;File=");
@@ -2901,16 +3205,27 @@ function framedPanel(theme: Theme, d: BandDef, ctl: PanelCtl): Component {
 	const body: Component =
 		ctl.id === "tools"
 			? new RichToolsBody(theme, d.version, d.empty, minRows, ctl)
-			: new RecentBody(
-					theme,
-					d.style,
-					d.lines,
-					d.version,
-					d.empty,
-					minRows,
-					ctl,
-					d.windowed ?? true,
-				);
+			: ctl.id === "thinking"
+				? new ThinkingBody(
+						theme,
+						d.style,
+						d.lines,
+						d.version,
+						d.empty,
+						minRows,
+						ctl,
+						d.windowed ?? true,
+					)
+				: new RecentBody(
+						theme,
+						d.style,
+						d.lines,
+						d.version,
+						d.empty,
+						minRows,
+						ctl,
+						d.windowed ?? true,
+					);
 	const scroll = new ScrollView(body, {
 		follow: "end",
 		overscroll: "contain",
@@ -2923,7 +3238,7 @@ function framedPanel(theme: Theme, d: BandDef, ctl: PanelCtl): Component {
 	});
 	ctl.scroll = scroll;
 	if (ctl.id === "tools") toolsScroll = scroll;
-	if (ctl.id === "thinking" && body instanceof RecentBody) thinkingBody = body;
+	if (ctl.id === "thinking" && body instanceof ThinkingBody) thinkingBody = body;
 	return new MeasurementSafeVStack([
 		{ component: new BorderTop(theme, d.title, d.color, d.streaming, ctl), basis: 1, grow: 0, shrink: 0 },
 		{ component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 1 },
@@ -3246,7 +3561,7 @@ function buildBodyScrollPair(
 	const body: Component =
 		id === "tools"
 			? new RichToolsBody(theme, d.version, d.empty, minRows, ctl)
-			: new RecentBody(
+			: new ThinkingBody(
 					theme,
 					d.style,
 					d.lines,
@@ -3267,7 +3582,7 @@ function buildBodyScrollPair(
 	ctl.scroll = scroll;
 	const reattach = () => {
 		if (id === "tools") toolsScroll = scroll;
-		if (id === "thinking" && body instanceof RecentBody) thinkingBody = body;
+		if (id === "thinking" && body instanceof ThinkingBody) thinkingBody = body;
 	};
 	reattach();
 	return { scroll, bottom: new BorderBottom(theme, ctl), reattach };
@@ -3281,26 +3596,40 @@ function summarizeDrawerPanel(id: "thinking" | "tools"): {
 	const activeTurns = activeTurnSelection();
 	if (id === "thinking") {
 		let lineCount = 0;
+		let blockCount = 0;
 		const filterTurns = thinkingScope === "session" ? activeTurns : null;
 		for (const b of thinking.blocks) {
 			if (filterTurns !== null && !filterTurns.includes(b.turn)) continue;
-			lineCount += b.lines.length;
+			const trimmed = trimBlankEdgeLines(b.lines);
+			if (trimmed.length === 0) continue;
+			blockCount++;
+			lineCount += trimmed.length;
 		}
 		if (
 			thinking.current &&
 			(filterTurns === null || filterTurns.includes(thinking.current.turn))
 		) {
-			lineCount +=
-				thinking.current.lines.length + (thinking.current.tail ? 1 : 0);
+			const raw = thinking.current.tail
+				? [...thinking.current.lines, thinking.current.tail]
+				: thinking.current.lines;
+			const trimmed = trimBlankEdgeLines(raw);
+			if (trimmed.length > 0 || thinking.streaming) {
+				blockCount++;
+				lineCount += trimmed.length;
+			}
 		}
 		const streaming = thinking.streaming;
-		if (lineCount === 0) {
+		if (lineCount === 0 && blockCount === 0) {
 			return { text: streaming ? "streaming" : "idle", streaming, errorCount: 0 };
 		}
 		const turnTag =
 			currentTurn > 0 ? ` · ${toolsPagerLabel(activeTurns, currentTurn)}` : "";
+		const countText =
+			thinkingMode === "compact"
+				? `${blockCount} block${blockCount === 1 ? "" : "s"}`
+				: `${lineCount} line${lineCount === 1 ? "" : "s"}`;
 		return {
-			text: `${lineCount} line${lineCount === 1 ? "" : "s"}${turnTag}`,
+			text: `${countText}${turnTag}`,
 			streaming,
 			errorCount: 0,
 		};
@@ -3488,6 +3817,7 @@ export default function (pi: ExtensionAPI) {
 		lastCtx = ctx;
 		aiRefiner.clear();
 		thinking.reset();
+		thinkingExpandOverrides.clear();
 		toolsBy.clear();
 		toolOrder.length = 0;
 		toolExpandOverrides.clear();
@@ -3579,6 +3909,7 @@ export default function (pi: ExtensionAPI) {
 		if (thoughts.length) {
 			for (const t of thoughts) {
 				thinking.current = {
+					id: nextThinkingBlockId++,
 					lines: t.text.split(/\r?\n/),
 					tail: "",
 					complete: true,
@@ -3626,6 +3957,7 @@ export default function (pi: ExtensionAPI) {
 			drawersStrategy.hydrate(cfg.layouts.drawers);
 		}
 		thinkingScope = cfg.thinkingScope;
+		thinkingMode = cfg.thinkingMode;
 		thinkingHudMode = cfg.thinkingHudMode;
 		toolMode = cfg.toolMode;
 		toolsScope = cfg.toolsScope;
@@ -4153,6 +4485,24 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("split-thinking-view", {
+		description: "Thinking panel view: compact (collapsible 1-line cards) | full (prose)",
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") return;
+			const arg = String(args ?? "").trim().toLowerCase();
+			if (arg === "compact") thinkingMode = "compact";
+			else if (arg === "full") thinkingMode = "full";
+			else thinkingMode = thinkingMode === "compact" ? "full" : "compact";
+			thinking.version++;
+			thinkingBody?.invalidate();
+			if (anyPanelActive()) requestRender();
+			ctx.ui.notify(
+				`Thinking view: ${thinkingMode === "compact" ? "compact (collapsible cards)" : "full prose"}`,
+				"info",
+			);
+		},
+	});
+
 	pi.registerCommand("split-thinking-hud", {
 		description: "Cycle or set Thinking Semantic HUD mode [ai|local|off|on]",
 		handler: async (args, ctx) => {
@@ -4190,12 +4540,29 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("split-drawer", {
-		description: "Toggle a collapsible drawer in drawers mode: thinking | tools",
+		description: "Toggle a drawer or set drawer position: thinking | tools | position [above|below]",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") return;
-			const arg = String(args ?? "").trim().toLowerCase();
+			const parts = String(args ?? "")
+				.trim()
+				.toLowerCase()
+				.split(/\s+/)
+				.filter(Boolean);
+			const arg = parts[0] ?? "";
 			if (layoutMode !== "drawers") {
 				ctx.ui.notify("Switch to drawers mode first: /split-preset drawers", "info");
+				return;
+			}
+			if (arg === "position") {
+				const next =
+					parts[1] === "above" || parts[1] === "below"
+						? parts[1]
+						: drawersStrategy.getPosition() === "above"
+							? "below"
+							: "above";
+				drawersStrategy.setPosition(next);
+				reconcileLayout(ctx.ui.theme);
+				ctx.ui.notify(`Drawer position: ${next} prompt`, "info");
 				return;
 			}
 			if (arg === "thinking" || arg === "tools") {
@@ -4207,7 +4574,7 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
-			ctx.ui.notify("Usage: /split-drawer <thinking|tools>", "info");
+			ctx.ui.notify("Usage: /split-drawer <thinking|tools|position [above|below]>", "info");
 		},
 	});
 
@@ -4370,6 +4737,10 @@ export default function (pi: ExtensionAPI) {
 			label: "drawers — Full-width Messages · collapsible Thinking & Tools drawers above prompt",
 		},
 		{
+			name: "drawers-below",
+			label: "drawers-below — Full-width Messages · prompt · collapsible drawers below prompt",
+		},
+		{
 			name: "chat-left",
 			label: "chat-left — Messages + prompt left · Thinking + Tools right",
 		},
@@ -4397,7 +4768,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("split-preset", {
 		description:
-			"Apply a layout preset (drawers | chat-left | workbench | sidebar-chat | classic | deep-think | focused-tools)",
+			"Apply a layout preset (drawers | drawers-below | chat-left | workbench | sidebar-chat | classic | deep-think | focused-tools)",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/split-preset requires interactive mode", "error");
@@ -4720,6 +5091,7 @@ export default function (pi: ExtensionAPI) {
 				toolsScope,
 				trimResponse,
 				thinkingScope,
+				thinkingMode,
 				thinkingHud: thinkingHudMode !== "off",
 				thinkingHudMode,
 				bandHeight,
