@@ -300,12 +300,14 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 	}
 
 	onTurnStart(): void {
-		// Reset per-turn manual overrides; Thinking stays collapsed until thinking_start,
-		// Tools stays collapsed until a tool actually runs in the new turn.
-		this.drawers.thinking.manualPin = false;
-		this.drawers.thinking.open = false;
-		this.drawers.tools.manualPin = false;
-		this.drawers.tools.open = false;
+		// Preserve manual collapse/expand choices for the entire session.
+		// Only auto-managed drawers reset to collapsed until activity starts.
+		if (!this.drawers.thinking.manualPin) {
+			this.drawers.thinking.open = false;
+		}
+		if (!this.drawers.tools.manualPin) {
+			this.drawers.tools.open = false;
+		}
 		const { cols, rows } = this.getTerminalSize();
 		this.applyGeometry(cols, rows);
 	}
