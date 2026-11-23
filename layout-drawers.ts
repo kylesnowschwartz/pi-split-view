@@ -228,7 +228,9 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 	} = {};
 
 	/** Cached ScrollViews survive zoom round-trips so drawer scroll positions persist. */
-	private cachedScrolls: Partial<Record<DrawerId, { scroll: ScrollView; bottom: Component }>> = {};
+	private cachedScrolls: Partial<
+		Record<DrawerId, { scroll: ScrollView; bottom: Component; reattach: () => void }>
+	> = {};
 
 	private lastCtx: LayoutContext | null = null;
 	private drag: DrawerDragState | null = null;
@@ -413,6 +415,7 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 			this.cachedScrolls[id] = pair;
 		} else if (pair) {
 			ctl.scroll = pair.scroll;
+			pair.reattach();
 		}
 		const header = new DrawerHeader(
 			id,

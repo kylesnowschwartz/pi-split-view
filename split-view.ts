@@ -3123,7 +3123,7 @@ function buildBodyScrollPair(
 	theme: Theme,
 	id: "thinking" | "tools",
 	ctl: PanelCtl,
-): { scroll: ScrollView; bottom: Component } {
+): { scroll: ScrollView; bottom: Component; reattach: () => void } {
 	const d = bandDef(theme, id);
 	const minRows = () =>
 		ctl.scroll?.viewportHeight ||
@@ -3152,9 +3152,12 @@ function buildBodyScrollPair(
 			theme.fg(t === "█" ? "accent" : "border", t === "┃" ? "│" : t),
 	});
 	ctl.scroll = scroll;
-	if (id === "tools") toolsScroll = scroll;
-	if (id === "thinking" && body instanceof RecentBody) thinkingBody = body;
-	return { scroll, bottom: new BorderBottom(theme, ctl) };
+	const reattach = () => {
+		if (id === "tools") toolsScroll = scroll;
+		if (id === "thinking" && body instanceof RecentBody) thinkingBody = body;
+	};
+	reattach();
+	return { scroll, bottom: new BorderBottom(theme, ctl), reattach };
 }
 
 function summarizeDrawerPanel(id: "thinking" | "tools"): {

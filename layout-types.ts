@@ -59,7 +59,7 @@ export interface LayoutContext {
 	buildBodyScroll?(
 		id: "thinking" | "tools",
 		ctl: PanelCtl,
-	): { scroll: ScrollView; bottom: Component };
+	): { scroll: ScrollView; bottom: Component; reattach: () => void };
 	panelSummary?(id: "thinking" | "tools"): PanelSummary;
 	toggleZoom?(id: PanelId): void;
 	pagerState?(): {
