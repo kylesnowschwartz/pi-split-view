@@ -34,8 +34,10 @@ export type SlotName = "topLeft" | "topRight" | "main" | "dock";
 export type SlotPanel = "thinking" | "tools" | "messages" | "files" | null;
 export type LayoutSlots = Record<SlotName, SlotPanel>;
 export type DockSide = "left" | "right";
+export type LayoutModeCfg = "grid" | "drawers";
 export type PresetName =
 	| "chat-left"
+	| "drawers"
 	| "workbench"
 	| "sidebar-chat"
 	| "classic"
@@ -48,6 +50,8 @@ export interface LayoutPreset {
 	toolsWidthPct: number;
 	filesWidth: number | null;
 	dockSide?: DockSide;
+	layoutMode?: LayoutModeCfg;
+	layoutState?: Record<string, unknown>;
 }
 
 export const LAYOUT_PRESETS: Record<PresetName, LayoutPreset> = {
@@ -62,6 +66,23 @@ export const LAYOUT_PRESETS: Record<PresetName, LayoutPreset> = {
 		toolsWidthPct: 50,
 		filesWidth: 74,
 		dockSide: "left",
+		layoutMode: "grid",
+	},
+	drawers: {
+		slots: {
+			topLeft: null,
+			topRight: null,
+			main: "messages",
+			dock: null,
+		},
+		bandHeight: 13,
+		toolsWidthPct: 50,
+		filesWidth: null,
+		layoutMode: "drawers",
+		layoutState: {
+			thinking: { open: false, height: 10 },
+			tools: { open: false, height: 14 },
+		},
 	},
 	classic: {
 		slots: {
@@ -192,6 +213,10 @@ export interface UiPanelsConfig {
 	/** Which side of the terminal the dock column sits on ("left" | "right").
 	 * Defaults to "right". */
 	dockSide?: DockSide;
+	/** Active layout strategy ("grid" | "drawers"). Defaults to "grid". */
+	layoutMode?: LayoutModeCfg;
+	/** Opaque per-strategy saved state (e.g. layouts.drawers). */
+	layouts?: Record<string, Record<string, unknown>>;
 	/** Named layout slot assignments (topLeft, topRight, main, dock). */
 	slots?: Partial<LayoutSlots>;
 }
@@ -229,6 +254,8 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 	toolsWidthPct: number;
 	filesWidth: number | null;
 	dockSide: DockSide;
+	layoutMode: LayoutModeCfg;
+	layouts: Record<string, Record<string, unknown>>;
 	slots: LayoutSlots;
 }> {
 	// SV-12: tolerate any shape — a null root, an array or a primitive reads
@@ -329,6 +356,16 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 				? "off"
 				: "ai";
 
+	const rawLayouts = root.layouts;
+	const layouts: Record<string, Record<string, unknown>> = {};
+	if (rawLayouts && typeof rawLayouts === "object" && !Array.isArray(rawLayouts)) {
+		for (const [k, v] of Object.entries(rawLayouts)) {
+			if (v && typeof v === "object" && !Array.isArray(v)) {
+				layouts[k] = { ...(v as Record<string, unknown>) };
+			}
+		}
+	}
+
 	return {
 		split,
 		thinking,
@@ -353,6 +390,8 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		toolsWidthPct,
 		filesWidth,
 		dockSide: root.dockSide === "left" ? "left" : "right",
+		layoutMode: root.layoutMode === "drawers" ? "drawers" : "grid",
+		layouts,
 		slots,
 	};
 }

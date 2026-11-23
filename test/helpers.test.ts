@@ -457,9 +457,10 @@ test("normalizeConfig: explicit slots normalize, deduplicate, and sync flags", (
 	assert.equal(allBad.files, false);
 });
 
-test("LAYOUT_PRESETS: all 6 presets exist and normalize cleanly", () => {
+test("LAYOUT_PRESETS: all 7 presets exist and normalize cleanly", () => {
 	const names: PresetName[] = [
 		"chat-left",
+		"drawers",
 		"classic",
 		"workbench",
 		"sidebar-chat",
@@ -475,16 +476,30 @@ test("LAYOUT_PRESETS: all 6 presets exist and normalize cleanly", () => {
 			toolsWidthPct: p.toolsWidthPct,
 			...(p.filesWidth === null ? {} : { filesWidth: p.filesWidth }),
 			...(p.dockSide ? { dockSide: p.dockSide } : {}),
+			...(p.layoutMode ? { layoutMode: p.layoutMode } : {}),
+			...(p.layoutState ? { layouts: { [p.layoutMode ?? "grid"]: p.layoutState } } : {}),
 		});
 		assert.deepEqual(norm.slots, p.slots);
 		assert.equal(norm.bandHeight, p.bandHeight);
 		assert.equal(norm.toolsWidthPct, p.toolsWidthPct);
 		assert.equal(norm.filesWidth, p.filesWidth);
 		assert.equal(norm.dockSide, p.dockSide ?? "right");
+		assert.equal(norm.layoutMode, p.layoutMode ?? "grid");
 	}
 	assert.equal(normalizeConfig({}).dockSide, "right");
 	assert.equal(normalizeConfig({ dockSide: "left" }).dockSide, "left");
 	assert.equal(normalizeConfig({ dockSide: "bogus" as any }).dockSide, "right");
+	assert.equal(normalizeConfig({}).layoutMode, "grid");
+	assert.equal(normalizeConfig({ layoutMode: "drawers" }).layoutMode, "drawers");
+	assert.equal(normalizeConfig({ layoutMode: "bogus" as any }).layoutMode, "grid");
+	assert.deepEqual(
+		normalizeConfig({
+			layoutMode: "drawers",
+			layouts: { drawers: { thinking: { open: true, height: 12 } } },
+		}).layouts,
+		{ drawers: { thinking: { open: true, height: 12 } } },
+	);
+	assert.deepEqual(normalizeConfig({ layouts: "bad" as any }).layouts, {});
 });
 
 test("assignSlot assigns to empty slot, swaps occupied slots, and clears with null", () => {

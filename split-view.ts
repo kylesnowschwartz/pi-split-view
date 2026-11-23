@@ -159,6 +159,7 @@ import {
 	type PanelId,
 } from "./layout-types.ts";
 import { GridLayoutStrategy } from "./layout-grid.ts";
+import { DrawersLayoutStrategy } from "./layout-drawers.ts";
 import {
 	alignTurnSpans,
 	appendStreamTail,
@@ -1274,7 +1275,9 @@ const anyPanelActive = () =>
 // those panels running after a /split off. Layout-layer checks remain in use
 // only for layout ownership (anyPanelActive/filesActive).
 const panelsActive = () =>
-	hasNonBareSlots() || trimResponse;
+	layoutMode === "drawers"
+		? drawersStrategy.wantsLayer()
+		: hasNonBareSlots() || trimResponse;
 const filesActive = () => isLayoutLayerActive("files") || !!REG.active;
 
 // ─── mouse: drag-resize, header buttons, wheel routing ───────────────────────
@@ -1322,10 +1325,17 @@ const gridStrategy = new GridLayoutStrategy({
 	},
 });
 
+const drawersStrategy = new DrawersLayoutStrategy(
+	() => ({
+		cols: tuiRef?.terminal?.columns ?? 120,
+		rows: tuiRef?.terminal?.rows ?? 40,
+	}),
+	() => requestRender(),
+);
+
 const strategies: Record<LayoutMode, LayoutStrategy> = {
 	grid: gridStrategy,
-	// Step 2 replaces this with DrawersLayoutStrategy.
-	drawers: gridStrategy,
+	drawers: drawersStrategy,
 };
 
 function activeStrategy(): LayoutStrategy {
@@ -1378,10 +1388,16 @@ function liveButtonAt(ev: TuiMouseEvent, id: PanelId): boolean {
 	);
 }
 
-/** Sync visible turns from the Messages ScrollView viewport. When the user
- * actively scrolls Messages, clears any manual `pinnedTurn` so auto-sync
- * resumes seamlessly. */
+let lastMessagesScrollTop = -1;
+
+/** Sync visible turns from the Messages ScrollView viewport. Only clears a
+ * manual `pinnedTurn` when scrollTop actually changed (explicit scroll), never
+ * on a pure viewportHeight shrink (e.g. a drawer auto-opening). */
 function syncVisibleTurnsFromMessages(scheduleRender = true): number[] {
+	const scrollTop = messagesScrollRef?.scrollTop ?? -1;
+	const scrollMoved =
+		lastMessagesScrollTop !== -1 && scrollTop !== lastMessagesScrollTop;
+	lastMessagesScrollTop = scrollTop;
 	const visible = messagesScrollRef
 		? visibleTurnsInViewport(
 				messageTurnSpans,
@@ -1394,6 +1410,7 @@ function syncVisibleTurnsFromMessages(scheduleRender = true): number[] {
 		if (suppressNextPinClear) {
 			suppressNextPinClear = false;
 		} else if (
+			scrollMoved &&
 			lastVisibleTurnsKey !== "" &&
 			messagesScrollRef &&
 			!messagesScrollRef.isFollowingEnd
@@ -3102,6 +3119,105 @@ function ensureResponseScrollView(theme: Theme, base: Component): ScrollView {
 	return responseScrollView;
 }
 
+function buildBodyScrollPair(
+	theme: Theme,
+	id: "thinking" | "tools",
+	ctl: PanelCtl,
+): { scroll: ScrollView; bottom: Component } {
+	const d = bandDef(theme, id);
+	const minRows = () =>
+		ctl.scroll?.viewportHeight ||
+		(ctl.minRows
+			? ctl.minRows()
+			: Math.max(1, (tuiRef?.terminal?.rows ?? 24) - bandHeight - 2));
+	const body: Component =
+		id === "tools"
+			? new RichToolsBody(theme, d.version, d.empty, minRows, ctl)
+			: new RecentBody(
+					theme,
+					d.style,
+					d.lines,
+					d.version,
+					d.empty,
+					minRows,
+					ctl,
+					d.windowed ?? true,
+				);
+	const scroll = new ScrollView(body, {
+		follow: "end",
+		overscroll: "contain",
+		scrollbar: "always",
+		scrollbarTrackStyle: (t: string) => theme.fg("border", t),
+		scrollbarThumbStyle: (t: string) =>
+			theme.fg(t === "█" ? "accent" : "border", t === "┃" ? "│" : t),
+	});
+	ctl.scroll = scroll;
+	if (id === "tools") toolsScroll = scroll;
+	if (id === "thinking" && body instanceof RecentBody) thinkingBody = body;
+	return { scroll, bottom: new BorderBottom(theme, ctl) };
+}
+
+function summarizeDrawerPanel(id: "thinking" | "tools"): {
+	text: string;
+	streaming: boolean;
+	errorCount: number;
+} {
+	const activeTurns = activeTurnSelection();
+	if (id === "thinking") {
+		let lineCount = 0;
+		const filterTurns = thinkingScope === "session" ? activeTurns : null;
+		for (const b of thinking.blocks) {
+			if (filterTurns !== null && !filterTurns.includes(b.turn)) continue;
+			lineCount += b.lines.length;
+		}
+		if (
+			thinking.current &&
+			(filterTurns === null || filterTurns.includes(thinking.current.turn))
+		) {
+			lineCount +=
+				thinking.current.lines.length + (thinking.current.tail ? 1 : 0);
+		}
+		const streaming = thinking.streaming;
+		if (lineCount === 0) {
+			return { text: streaming ? "streaming" : "idle", streaming, errorCount: 0 };
+		}
+		const turnTag =
+			currentTurn > 0 ? ` · ${toolsPagerLabel(activeTurns, currentTurn)}` : "";
+		return {
+			text: `${lineCount} line${lineCount === 1 ? "" : "s"}${turnTag}`,
+			streaming,
+			errorCount: 0,
+		};
+	}
+	const activeSet = activeTurns !== null ? new Set(activeTurns) : null;
+	let total = 0;
+	let running = 0;
+	let errorCount = 0;
+	let latestName = "";
+	for (const tid of toolOrder) {
+		const entry = toolsBy.get(tid);
+		if (!entry) continue;
+		if (activeSet !== null && !activeSet.has(entry.turn)) continue;
+		total++;
+		if (entry.active) running++;
+		if (entry.isError) errorCount++;
+		latestName = entry.name;
+	}
+	if (total === 0) {
+		return { text: "idle", streaming: false, errorCount: 0 };
+	}
+	const parts: string[] = [];
+	if (running > 0) parts.push(`${running} running`);
+	const done = total - running;
+	if (done > 0) parts.push(`${done} done`);
+	if (latestName) parts.push(latestName);
+	return {
+		text: parts.join(" · "),
+		streaming: running > 0,
+		errorCount,
+	};
+}
+
 /** Build the full composed layout root via the active LayoutStrategy. */
 function composeLayout(theme: Theme, inner: Component): Component {
 	const strat = activeStrategy();
@@ -3131,6 +3247,40 @@ function composeLayout(theme: Theme, inner: Component): Component {
 		cols,
 		rows,
 		buildSlotPanel: (id, slot, ctl) => buildSlotPanel(theme, id, slot, base, ctl),
+		buildBodyScroll: (id, ctl) => buildBodyScrollPair(theme, id, ctl),
+		panelSummary: (id) => summarizeDrawerPanel(id),
+		toggleZoom: (id) => toggleZoom(id),
+		pagerState: () => {
+			const activeTurns = activeTurnSelection();
+			const anchor =
+				pinnedTurn !== null
+					? Math.max(1, Math.min(currentTurn, pinnedTurn))
+					: activeTurns && activeTurns.length > 0
+						? activeTurns[0]!
+						: currentTurn;
+			const canPrev = anchor > 1;
+			const canNext =
+				pinnedTurn !== null ||
+				(activeTurns !== null &&
+					activeTurns.length > 0 &&
+					activeTurns[activeTurns.length - 1]! < currentTurn);
+			return {
+				currentTurn,
+				label: toolsPagerLabel(activeTurns, currentTurn),
+				canPrev,
+				canNext,
+				isAll: toolsScope === "all" && pinnedTurn === null,
+				pinned: pinnedTurn !== null,
+				liveShown: liveButtonVisible(),
+				liveOn: liveToolId !== null,
+			};
+		},
+		stepTurn: (delta) => stepTurn(delta),
+		toggleToolsScopeAll: () => toggleToolsScopeAll(),
+		toggleToolsLive: () => toggleToolsLive(),
+		isMessagesFollowingEnd: () => messagesScrollRef?.isFollowingEnd ?? true,
+		getMessagesViewportHeight: () => messagesScrollRef?.viewportHeight ?? 0,
+		isTurnPinned: () => pinnedTurn !== null,
 		requestRender: () => requestRender(),
 	};
 	return strat.compose(ctx);
@@ -3192,6 +3342,7 @@ export default function (pi: ExtensionAPI) {
 						if (composedThemeFp === null) composedThemeFp = fp;
 						else if (fp !== composedThemeFp) {
 							composedThemeFp = fp;
+							drawersStrategy.clearScrollCache();
 							if (anyPanelActive()) {
 								rebuildResponseDoc(ctx);
 								reconcileLayout(liveTheme);
@@ -3230,7 +3381,9 @@ export default function (pi: ExtensionAPI) {
 		pinnedTurn = null;
 		messageTurnSpans = [];
 		lastVisibleTurnsKey = "";
+		lastMessagesScrollTop = -1;
 		suppressNextPinClear = false;
+		activeStrategy().onReconstruct?.();
 		toolsVersionCounter++;
 		files.clear();
 		bumpFilesVersion();
@@ -3351,6 +3504,11 @@ export default function (pi: ExtensionAPI) {
 		}
 		layoutSlots = { ...cfg.slots };
 		syncFlagsFromSlots();
+		layoutMode = pi.getFlag("no-split") ? "grid" : cfg.layoutMode;
+		drawersStrategy.setEnabled(layoutMode === "drawers");
+		if (cfg.layouts.drawers) {
+			drawersStrategy.hydrate(cfg.layouts.drawers);
+		}
 		thinkingScope = cfg.thinkingScope;
 		thinkingHudMode = cfg.thinkingHudMode;
 		toolMode = cfg.toolMode;
@@ -3408,8 +3566,10 @@ export default function (pi: ExtensionAPI) {
 		lastCtx = ctx;
 		const d = (event as any).assistantMessageEvent;
 		if (d) {
-			if (d.type === "thinking_start") thinking.start();
-			else if (d.type === "thinking_delta") thinking.append(d.delta ?? "");
+			if (d.type === "thinking_start") {
+				thinking.start();
+				activeStrategy().onThinkingStart?.();
+			} else if (d.type === "thinking_delta") thinking.append(d.delta ?? "");
 			else if (d.type === "thinking_end") thinking.end(d.content ?? "");
 		}
 		responseMessageUpdate((event as any).message);
@@ -3439,6 +3599,7 @@ export default function (pi: ExtensionAPI) {
 				if (thinkingScope === "turn") {
 					thinking.reset();
 				}
+				activeStrategy().onTurnStart?.();
 				addResponseMessage(msg);
 			}
 		}
@@ -3453,6 +3614,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_execution_start", (event) => {
 		// SV-17: same ingest path the branch rebuild uses.
 		ingestToolCall(event.toolCallId, event.toolName, event.args, Date.now());
+		activeStrategy().onToolStart?.(false);
 		if (anyPanelActive()) requestRender();
 	});
 	pi.on("tool_execution_update", (event) => {
@@ -3640,8 +3802,14 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("/files requires interactive mode", "error");
 			return filesActive();
 		}
-		// Fullscreen: use the composed layer.
-		if (tuiRef && typeof tuiRef.setLayoutRoot === "function") {
+		// Fullscreen grid mode: use the composed dock layer.
+		// In drawers mode, fall through to the non-capturing right overlay so
+		// single-column Messages stays intact.
+		if (
+			layoutMode === "grid" &&
+			tuiRef &&
+			typeof tuiRef.setLayoutRoot === "function"
+		) {
 			const existingSlot = slotOf("files");
 			if (existingSlot !== null) {
 				layoutSlots[existingSlot] = null;
@@ -3744,40 +3912,52 @@ export default function (pi: ExtensionAPI) {
 			// toolMode, toolsWidthPct) is session-local and not reset here.
 			const wasOn = panelsActive();
 			if (wasOn) {
-				layoutSlots = {
-					topLeft: null,
-					topRight: null,
-					main: "messages",
-					dock: null,
-				};
-				syncFlagsFromSlots();
+				if (layoutMode === "drawers") {
+					drawersStrategy.setEnabled(false);
+				} else {
+					layoutSlots = {
+						topLeft: null,
+						topRight: null,
+						main: "messages",
+						dock: null,
+					};
+					syncFlagsFromSlots();
+				}
 				trimResponse = false;
 				zoomed = null;
 				reconcileLayout(ctx.ui.theme);
 				ctx.ui.notify("Split view off (all panels) · /split-save saves defaults", "info");
 			} else {
 				const cfg = normalizeConfig(loadUiPanelsConfig());
-				const savedBare =
-					cfg.slots.topLeft === null &&
-					cfg.slots.topRight === null &&
-					cfg.slots.main === "messages" &&
-					cfg.slots.dock === null &&
-					!cfg.trimResponse;
-				if (savedBare) {
-					layoutSlots = {
-						topLeft: "thinking",
-						topRight: "tools",
-						main: "messages",
-						dock: null,
-					};
+				if (layoutMode === "drawers" || cfg.layoutMode === "drawers") {
+					layoutMode = "drawers";
+					drawersStrategy.setEnabled(true);
+					if (cfg.layouts.drawers) drawersStrategy.hydrate(cfg.layouts.drawers);
+					const base = getBaseRoot();
+					if (base && baseDockOf(base)) trimResponse = true;
 				} else {
-					layoutSlots = { ...cfg.slots };
-					showDiff = cfg.diff;
-					answerDividerMode = cfg.answerDivider;
-					trimResponse = cfg.trimResponse;
-					responseSource = cfg.responseSource;
+					const savedBare =
+						cfg.slots.topLeft === null &&
+						cfg.slots.topRight === null &&
+						cfg.slots.main === "messages" &&
+						cfg.slots.dock === null &&
+						!cfg.trimResponse;
+					if (savedBare) {
+						layoutSlots = {
+							topLeft: "thinking",
+							topRight: "tools",
+							main: "messages",
+							dock: null,
+						};
+					} else {
+						layoutSlots = { ...cfg.slots };
+						showDiff = cfg.diff;
+						answerDividerMode = cfg.answerDivider;
+						trimResponse = cfg.trimResponse;
+						responseSource = cfg.responseSource;
+					}
+					syncFlagsFromSlots();
 				}
-				syncFlagsFromSlots();
 				reconcileLayout(ctx.ui.theme);
 				ctx.ui.notify("Split view on (saved layout) · /split-save saves defaults", "info");
 			}
@@ -3817,9 +3997,15 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("split-thinking", {
-		description: "Toggle the thinking panel within the band",
+		description: "Toggle the thinking panel (or Thinking drawer in drawers mode)",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") return;
+			if (layoutMode === "drawers") {
+				drawersStrategy.toggleDrawer("thinking");
+				const st = drawersStrategy.getDrawerState("thinking");
+				ctx.ui.notify(`Thinking drawer ${st.open ? "expanded" : "collapsed"}`, "info");
+				return;
+			}
 			const on = toggleBandPanel("thinking", "topLeft");
 			reconcileLayout(ctx.ui.theme);
 			if (layoutSlots.topLeft !== null || layoutSlots.topRight !== null) {
@@ -3872,12 +4058,40 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("split-tools", {
-		description: "Toggle the tools panel within the band",
+		description: "Toggle the tools panel (or Tool Usage drawer in drawers mode)",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") return;
+			if (layoutMode === "drawers") {
+				drawersStrategy.toggleDrawer("tools");
+				const st = drawersStrategy.getDrawerState("tools");
+				ctx.ui.notify(`Tools drawer ${st.open ? "expanded" : "collapsed"}`, "info");
+				return;
+			}
 			const on = toggleBandPanel("tools", "topRight");
 			reconcileLayout(ctx.ui.theme);
 			ctx.ui.notify(`Tools ${on ? "on" : "off"}`, "info");
+		},
+	});
+
+	pi.registerCommand("split-drawer", {
+		description: "Toggle a collapsible drawer in drawers mode: thinking | tools",
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") return;
+			const arg = String(args ?? "").trim().toLowerCase();
+			if (layoutMode !== "drawers") {
+				ctx.ui.notify("Switch to drawers mode first: /split-preset drawers", "info");
+				return;
+			}
+			if (arg === "thinking" || arg === "tools") {
+				drawersStrategy.toggleDrawer(arg);
+				const st = drawersStrategy.getDrawerState(arg);
+				ctx.ui.notify(
+					`${arg === "thinking" ? "Thinking" : "Tools"} drawer ${st.open ? "expanded" : "collapsed"}`,
+					"info",
+				);
+				return;
+			}
+			ctx.ui.notify("Usage: /split-drawer <thinking|tools>", "info");
 		},
 	});
 
@@ -4036,6 +4250,10 @@ export default function (pi: ExtensionAPI) {
 
 	const PRESET_OPTIONS: { name: PresetName; label: string }[] = [
 		{
+			name: "drawers",
+			label: "drawers — Full-width Messages · collapsible Thinking & Tools drawers above prompt",
+		},
+		{
 			name: "chat-left",
 			label: "chat-left — Messages + prompt left · Thinking + Tools right",
 		},
@@ -4063,7 +4281,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("split-preset", {
 		description:
-			"Apply a layout preset (chat-left | workbench | sidebar-chat | classic | deep-think | focused-tools)",
+			"Apply a layout preset (drawers | chat-left | workbench | sidebar-chat | classic | deep-think | focused-tools)",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/split-preset requires interactive mode", "error");
@@ -4092,6 +4310,12 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!chosen) return;
 			const preset = LAYOUT_PRESETS[chosen];
+			const nextMode: LayoutMode = preset.layoutMode ?? "grid";
+			layoutMode = nextMode;
+			drawersStrategy.setEnabled(nextMode === "drawers");
+			if (nextMode === "drawers" && preset.layoutState) {
+				drawersStrategy.hydrate(preset.layoutState);
+			}
 			layoutSlots = { ...preset.slots };
 			bandHeight = preset.bandHeight;
 			toolsWidthPct = preset.toolsWidthPct;
@@ -4101,9 +4325,10 @@ export default function (pi: ExtensionAPI) {
 			syncFlagsFromSlots();
 			const base = getBaseRoot();
 			if (
-				slotOf("messages") !== null &&
-				slotOf("messages") !== "main" &&
-				slotOf("tools") !== null &&
+				(nextMode === "drawers" ||
+					(slotOf("messages") !== null &&
+						slotOf("messages") !== "main" &&
+						slotOf("tools") !== null)) &&
 				base &&
 				baseDockOf(base)
 			) {
@@ -4120,6 +4345,13 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/split-slot requires interactive mode", "error");
+				return;
+			}
+			if (layoutMode !== "grid") {
+				ctx.ui.notify(
+					"/split-slot applies to grid layouts (switch with /split-preset chat-left)",
+					"info",
+				);
 				return;
 			}
 			if (!tuiRef || typeof tuiRef.setLayoutRoot !== "function") {
@@ -4260,6 +4492,13 @@ export default function (pi: ExtensionAPI) {
 		description: "Move the dock column to the left or right (left | right)",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") return;
+			if (layoutMode !== "grid") {
+				ctx.ui.notify(
+					"/split-dock-side applies to grid layouts (switch with /split-preset chat-left)",
+					"info",
+				);
+				return;
+			}
 			const arg = String(args ?? "").trim().toLowerCase();
 			if (arg === "left" || arg === "right") dockSide = arg;
 			else dockSide = dockSide === "left" ? "right" : "left";
@@ -4371,6 +4610,10 @@ export default function (pi: ExtensionAPI) {
 				toolsWidthPct,
 				...(filesWidth === null ? {} : { filesWidth }),
 				dockSide,
+				layoutMode,
+				layouts: {
+					drawers: drawersStrategy.serialize(),
+				},
 				diff: showDiff,
 				answerDivider: answerDividerMode,
 				responseSource,
