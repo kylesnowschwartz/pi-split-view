@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MAX_DIR_ENTRIES, TreeController } from "../filetree/controller.ts";
+import { MAX_DIR_ENTRIES, notedSelectionOf, SELECTION_NOTE_TYPE, TreeController } from "../filetree/controller.ts";
 import { CLOSE_INTERVAL_MS, HOLD_MS, TICK_MS } from "../filetree/timing.ts";
 import { fakeIo, settle, type World } from "./filetree-world.ts";
 
@@ -463,11 +463,14 @@ test("the selection note goes out once per change, names the file, and reports a
 	assert.equal(tree.selectionNote(), null);
 	tree.select("/r/src/b.ts");
 	const note = tree.selectionNote();
-	assert.match(note ?? "", /src\/b\.ts/);
-	assert.match(note ?? "", /\/r\/src\/b\.ts/);
+	assert.equal(note?.path, "/r/src/b.ts");
+	assert.match(note?.text ?? "", /src\/b\.ts/);
+	assert.match(note?.text ?? "", /\/r\/src\/b\.ts/);
 	assert.equal(tree.selectionNote(), null);
 	tree.select("");
-	assert.match(tree.selectionNote() ?? "", /No file is selected/);
+	const cleared = tree.selectionNote();
+	assert.equal(cleared?.path, "");
+	assert.match(cleared?.text ?? "", /No file is selected/);
 	assert.equal(tree.selectionNote(), null);
 	tree.select("/r/a.ts");
 	tree.select("");
@@ -480,7 +483,7 @@ test("a forgotten note is sent again, and a selected file that is deleted is des
 	tree.select("/r/a.ts");
 	assert.ok(tree.selectionNote());
 	tree.forgetSelectionNote();
-	assert.match(tree.selectionNote() ?? "", /a\.ts/);
+	assert.match(tree.selectionNote()?.text ?? "", /a\.ts/);
 	w.dirs["/r"] = w.dirs["/r"]!.filter(([name]) => name !== "a.ts");
 	await tree.sync();
 	assert.equal(tree.selected, "");
@@ -566,4 +569,57 @@ test("a file changed outside any write call while bash runs is still marked as a
 	tree.toolEnd("b1", false, "");
 	await settle();
 	assert.equal(kindOf(tree, "/r/a.ts"), "recent:bash:bash");
+});
+
+// ─── selection across a reload or resume ────────────────────────────────────
+
+const noteEntry = (path: string) => ({ type: "custom_message", customType: SELECTION_NOTE_TYPE, content: "…", display: false, details: { path } });
+
+test("the newest selection note on the branch gives the noted file", () => {
+	const user = { type: "message", message: { role: "user", content: "hi" } };
+	assert.equal(notedSelectionOf([]), null);
+	assert.equal(notedSelectionOf([user, { type: "custom_message", customType: "other", details: { path: "/x" } }]), null);
+	assert.equal(notedSelectionOf([noteEntry("/r/a.ts"), user, noteEntry("/r/src/b.ts"), user]), "/r/src/b.ts");
+	assert.equal(notedSelectionOf([noteEntry("/r/a.ts"), noteEntry("")]), "");
+	assert.equal(notedSelectionOf([{ type: "custom_message", customType: SELECTION_NOTE_TYPE }]), null);
+});
+
+test("start restores a noted file that still exists, in a folder not listed yet, and sends no new note", async () => {
+	const w = base();
+	w.files = { "/r/src/deep/c.ts": "x" };
+	const io = fakeIo(w);
+	const tree = new TreeController(io, { changed: () => {}, visible: () => true });
+	await tree.start("/r", notedSelectionOf([noteEntry("/r/src/deep/c.ts")]));
+	assert.equal(tree.selected, "/r/src/deep/c.ts");
+	assert.equal(tree.selectionNote(), null);
+	await tree.sync();
+	assert.equal(tree.selected, "/r/src/deep/c.ts", "a sync of other folders keeps it");
+	tree.select("");
+	assert.equal(tree.selectionNote()?.path, "");
+});
+
+test("start with a noted file that is gone selects nothing and sends one cleared note", async () => {
+	const io = fakeIo(base());
+	const tree = new TreeController(io, { changed: () => {}, visible: () => true });
+	await tree.start("/r", "/r/src/gone.ts");
+	assert.equal(tree.selected, "");
+	const note = tree.selectionNote();
+	assert.equal(note?.path, "");
+	assert.match(note?.text ?? "", /No file is selected/);
+	assert.equal(tree.selectionNote(), null);
+});
+
+test("start with a cleared note, no note, or a noted path outside the root selects nothing", async () => {
+	const w = base();
+	w.files = { "/elsewhere/x.ts": "x" };
+	for (const noted of ["", null]) {
+		const tree = new TreeController(fakeIo(w), { changed: () => {}, visible: () => true });
+		await tree.start("/r", noted);
+		assert.equal(tree.selected, "");
+		assert.equal(tree.selectionNote(), null);
+	}
+	const tree = new TreeController(fakeIo(w), { changed: () => {}, visible: () => true });
+	await tree.start("/r", "/elsewhere/x.ts");
+	assert.equal(tree.selected, "");
+	assert.equal(tree.selectionNote()?.path, "");
 });

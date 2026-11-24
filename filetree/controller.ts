@@ -20,6 +20,24 @@ export const MAX_DIR_ENTRIES = 1000;
  * its rows go too; unreadable when listing it failed, so the rows it had stay. */
 type Listing = { kind: "listed"; nodes: FileNode[]; more: number } | { kind: "gone" } | { kind: "unreadable" };
 
+/** The customType of the hidden message that tells the model the selection. */
+export const SELECTION_NOTE_TYPE = "split-view-tree-selection";
+
+/** A selection note: its text for the model, and the file it names ("" for
+ * a cleared selection). The file travels in the message's details. */
+export type SelectionNote = { text: string; path: string };
+
+/** The file the newest selection note among session entries names: "" for a
+ * note that says the selection was cleared, null when there is no note. */
+export function notedSelectionOf(entries: readonly unknown[]): string | null {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i] as { type?: unknown; customType?: unknown; details?: { path?: unknown } } | null;
+		if (e?.type !== "custom_message" || e.customType !== SELECTION_NOTE_TYPE) continue;
+		return typeof e.details?.path === "string" ? e.details.path : null;
+	}
+	return null;
+}
+
 export interface ControllerHost {
 	/** The tree changed: draw it again. */
 	changed(): void;
@@ -85,12 +103,31 @@ export class TreeController {
 		);
 	}
 
-	/** Build the tree for a session's working directory. */
-	async start(cwd: string): Promise<void> {
+	/**
+	 * Build the tree for a session's working directory. `noted` is the file
+	 * the newest selection note on the session branch names: "" for a note
+	 * that says the selection was cleared, null when the branch has no note.
+	 * A noted file that still exists under the root is the selection again,
+	 * and the model needs no new note. A noted file that is gone leaves no
+	 * selection, and the next prompt carries a note that says so.
+	 */
+	async start(cwd: string, noted: string | null = null): Promise<void> {
 		this.reset();
 		const mine = this.gen;
 		this.root = cwd.replace(/\\/g, "/").replace(/(.)\/+$/, "$1");
 		this.cwd = this.root;
+		if (noted) {
+			this.notedSelection = noted;
+			const kept =
+				noted !== this.root &&
+				inside(this.root, noted) &&
+				(await this.io.fs.stat(noted).then(
+					(st) => st.kind !== "dir",
+					() => false,
+				));
+			if (mine !== this.gen) return;
+			if (kept && !this.selected) this.selected = noted;
+		}
 		await this.loadDirs([this.root]);
 		if (mine !== this.gen) return;
 		this.host.changed();
@@ -225,17 +262,23 @@ export class TreeController {
 	}
 
 	/** The note for the model about the selection when it differs from the
-	 * last note given; null when the model already knows. */
-	selectionNote(): string | null {
+	 * last note given: its text and the file it names ("" for a cleared
+	 * selection). null when the model already knows. */
+	selectionNote(): SelectionNote | null {
 		if (this.selected === this.notedSelection) return null;
 		this.notedSelection = this.selected;
 		if (!this.selected)
-			return "The user cleared the file selection in the file tree sidebar. No file is selected now.";
-		return (
-			`The user selected a file in the file tree sidebar: ${relative(this.root, this.selected)} ` +
-			`(absolute path: ${this.selected}). When the user says "this file", "the selected file" ` +
-			"or similar without naming one, they mean this file. Do not read or change it unless the prompt asks for that."
-		);
+			return {
+				path: "",
+				text: "The user cleared the file selection in the file tree sidebar. No file is selected now.",
+			};
+		return {
+			path: this.selected,
+			text:
+				`The user selected a file in the file tree sidebar: ${relative(this.root, this.selected)} ` +
+				`(absolute path: ${this.selected}). When the user says "this file", "the selected file" ` +
+				"or similar without naming one, they mean this file. Do not read or change it unless the prompt asks for that.",
+		};
 	}
 
 	forgetSelectionNote(): void {
@@ -313,7 +356,8 @@ export class TreeController {
 		this.nodes = replaceChildren(this.nodes, listed, more);
 		const alive = new Set(this.nodes.map((n) => n.id));
 		for (const id of this.expanded) if (!alive.has(id)) this.expanded.delete(id);
-		if (this.selected && !alive.has(this.selected)) this.selected = "";
+		// The selected file goes only when its own folder was listed without it.
+		if (this.selected && listed.has(dirname(this.selected)) && !alive.has(this.selected)) this.selected = "";
 		this.touch();
 	}
 

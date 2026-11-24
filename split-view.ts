@@ -3350,7 +3350,7 @@ export default function (pi: ExtensionAPI) {
 		drawers.setEnabled(!noSplit);
 		drawers.hydrate(cfg.drawers);
 		fileTree.hydrate(cfg.tree);
-		if (ctx.mode === "tui") fileTree.start(ctx.cwd);
+		if (ctx.mode === "tui") fileTree.start(ctx.cwd, ctx.sessionManager.getBranch());
 		thinkingScope = cfg.thinkingScope;
 		thinkingMode = cfg.thinkingMode;
 		thinkingHudMode = cfg.thinkingHudMode;
@@ -3451,11 +3451,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", (event) => {
 		fileTree.promptStart();
 		if (event.messageType !== "user" || !anyPanelActive()) return;
-		const note = fileTree.selectionNote();
-		if (!note) return;
-		return {
-			message: { customType: "split-view-tree-selection", content: note, display: false },
-		};
+		const message = fileTree.selectionMessage();
+		if (message) return { message };
 	});
 
 	// Tool stream.

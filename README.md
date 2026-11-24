@@ -74,7 +74,9 @@ The Thinking drawer above is collapsed to its one-row bar; the Tool Usage drawer
   never closes. Other folders close only when the touched rows need the room, at most
   once every 2 seconds. Touched rows that still do not fit are counted in the header
   (`↑2 ↓1`). A click selects a file; the bottom border names it, and the next prompt
-  tells the model which file is selected, without changing the prompt text. The pane
+  tells the model which file is selected, without changing the prompt text. The
+  selection comes back after `/reload` and on resume; when the file is gone by then,
+  the next prompt tells the model that nothing is selected. The pane
   hides when the terminal is narrower than 100 columns, and a zoomed drawer leaves it
   in place.
 - **One layout layer** — the extension composes one layer around pi's own transcript and

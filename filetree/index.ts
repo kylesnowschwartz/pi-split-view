@@ -11,7 +11,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type Component, HStack, truncateToWidth, VStack, visibleWidth } from "@earendil-works/pi-tui";
 import { toolHudBadge } from "../helpers.ts";
-import { TreeController } from "./controller.ts";
+import { notedSelectionOf, SELECTION_NOTE_TYPE, TreeController } from "./controller.ts";
 import { BRANCH_ICON } from "./icons.ts";
 import { nodeIo, type TreeIo } from "./io.ts";
 import { type PaneBody, type PaneModel, TreePane } from "./pane.ts";
@@ -111,9 +111,11 @@ export class FileTree {
 		this.pane = new TreePane(model);
 	}
 
-	/** Build the tree for a session's working directory. */
-	start(cwd: string): void {
-		void this.tree.start(cwd).catch(() => undefined);
+	/** Build the tree for a session's working directory. `branch` is the
+	 * session branch's entries; the newest selection note among them restores
+	 * the selection. */
+	start(cwd: string, branch: readonly unknown[] = []): void {
+		void this.tree.start(cwd, notedSelectionOf(branch)).catch(() => undefined);
 	}
 
 	/** Drop the tree and stop its timers. */
@@ -143,13 +145,15 @@ export class FileTree {
 	}
 
 	/**
-	 * The note for the model about the selection, when it differs from the
-	 * last note given: the selected file, or that the selection was cleared.
-	 * null when the model already knows. The caller sends the note with the
-	 * next prompt.
+	 * The hidden message for the model about the selection, when it differs
+	 * from the last one given: the selected file, or that the selection was
+	 * cleared. null when the model already knows. The caller returns it from
+	 * before_agent_start, so it goes out with the next prompt.
 	 */
-	selectionNote(): string | null {
-		return this.tree.selectionNote();
+	selectionMessage(): { customType: string; content: string; display: false; details: { path: string } } | null {
+		const note = this.tree.selectionNote();
+		if (!note) return null;
+		return { customType: SELECTION_NOTE_TYPE, content: note.text, display: false, details: { path: note.path } };
 	}
 
 	/** Forget what the model was told, so the next prompt carries the
