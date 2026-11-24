@@ -485,3 +485,85 @@ test("a forgotten note is sent again, and a selected file that is deleted is des
 	await tree.sync();
 	assert.equal(tree.selected, "");
 });
+
+// ─── bash beside write calls ────────────────────────────────────────────────
+
+const kindOf = (tree: TreeController, id: string) => {
+	const m = tree.marks().get(id);
+	return m ? `${m.state}:${m.kind}:${m.tool}` : undefined;
+};
+
+/** A repo where a.ts is clean; `edit()` makes git report it as modified. */
+function repoWorld() {
+	const w = base();
+	w.top = "/r";
+	w.status = "## main\0";
+	w.numstat = "";
+	w.files = { "/r/a.ts": "x\n", "/r/src/b.ts": "y\n" };
+	const edit = (rel: string) => {
+		w.status += ` M ${rel}\0`;
+		w.numstat += `1\t0\t${rel}\0`;
+	};
+	return { w, edit };
+}
+
+test("edit and bash in one batch, edit ends first: the edited file keeps its write mark", async () => {
+	const { w, edit } = repoWorld();
+	const { tree } = await make(w);
+	tree.toolStart("e1", "edit", { path: "a.ts", edits: [] });
+	tree.toolStart("b1", "bash", { command: "echo y >> src/b.ts" });
+	await settle();
+	edit("a.ts");
+	tree.toolEnd("e1", false, "ok");
+	await settle();
+	assert.equal(kindOf(tree, "/r/a.ts"), "recent:write:edit");
+	edit("src/b.ts");
+	tree.toolEnd("b1", false, "");
+	await settle();
+	assert.equal(kindOf(tree, "/r/a.ts"), "recent:write:edit");
+	assert.equal(kindOf(tree, "/r/src/b.ts"), "recent:bash:bash");
+});
+
+test("edit and bash in one batch, bash ends first: the file under edit stays running, then holds as a write", async () => {
+	const { w, edit } = repoWorld();
+	const { tree } = await make(w);
+	tree.toolStart("e1", "edit", { path: "a.ts", edits: [] });
+	tree.toolStart("b1", "bash", { command: "echo y >> src/b.ts" });
+	await settle();
+	edit("a.ts");
+	edit("src/b.ts");
+	tree.toolEnd("b1", false, "");
+	await settle();
+	assert.equal(kindOf(tree, "/r/a.ts"), "running:write:edit");
+	assert.equal(kindOf(tree, "/r/src/b.ts"), "recent:bash:bash");
+	tree.toolEnd("e1", false, "ok");
+	await settle();
+	assert.equal(kindOf(tree, "/r/a.ts"), "recent:write:edit");
+});
+
+test("a bash call that changes nothing after an edit leaves the edit's mark alone", async () => {
+	const { w, edit } = repoWorld();
+	const { io, tree } = await make(w);
+	tree.toolStart("e1", "edit", { path: "a.ts", edits: [] });
+	edit("a.ts");
+	tree.toolEnd("e1", false, "ok");
+	// The bash call starts before the read of git that follows the edit is in.
+	tree.toolStart("b1", "bash", { command: "true" });
+	await settle();
+	io.advance(1_000);
+	tree.toolEnd("b1", false, "");
+	await settle();
+	assert.equal(kindOf(tree, "/r/a.ts"), "recent:write:edit");
+	assert.deepEqual(Object.keys(stateOf(tree)), ["/r/a.ts"]);
+});
+
+test("a file changed outside any write call while bash runs is still marked as a bash change", async () => {
+	const { w, edit } = repoWorld();
+	const { tree } = await make(w);
+	tree.toolStart("b1", "bash", { command: "sleep 1" });
+	await settle();
+	edit("a.ts");
+	tree.toolEnd("b1", false, "");
+	await settle();
+	assert.equal(kindOf(tree, "/r/a.ts"), "recent:bash:bash");
+});

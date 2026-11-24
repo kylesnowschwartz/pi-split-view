@@ -135,6 +135,15 @@ export class Activity {
 		return next;
 	}
 
+	/** The paths a write-kind call names that are running or inside their
+	 * hold at `now`. */
+	written(now: number): Set<string> {
+		const out = new Set<string>();
+		for (const [path, h] of this.held) if (h.kind === "write" && h.until > now) out.add(path);
+		for (const c of this.calls.values()) if (c.kind === "write") for (const path of c.paths) out.add(path);
+		return out;
+	}
+
 	/** Whether a running call names a path. */
 	hasRunning(): boolean {
 		for (const c of this.calls.values()) if (c.paths.length > 0) return true;

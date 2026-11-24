@@ -412,7 +412,10 @@ export class TreeController {
 			this.bashBefore.delete(id);
 			await this.sync();
 			if (mine !== this.gen || !before || !this.git.top) return;
-			const changed = changedBetween(before, this.git.files);
+			// A file that an edit or write call names, running or inside its
+			// hold, keeps its write mark: that call accounts for the change.
+			const written = this.activity.written(this.io.clock.now());
+			const changed = changedBetween(before, this.git.files).filter((path) => !written.has(path));
 			// A call that is still running sees this call's changes as already there.
 			for (const key of this.bashBefore.keys()) this.bashBefore.set(key, this.git.files);
 			if (changed.length === 0) return;
