@@ -4,7 +4,7 @@
 	"engines": {
 		"node": ">=18.0.0"
 	},
-	"description": "Split-view TUI extension for the pi coding agent: thinking/tool band, files dock with edit-diff subpanel, response-only transcript mode",
+	"description": "Drawers-view TUI extension for the pi coding agent: Messages over the editor, collapsible Thinking and Tool Usage drawers at the bottom, response-only transcript mode",
 	"scripts": {
 		"typecheck": "tsc --noEmit",
 		"test": "node --test test/*.test.ts"
@@ -34,7 +34,6 @@
 		"README.md",
 		"CHANGELOG.md",
 		"LICENSE",
-		"assets/screenshot-band-files.png",
 		"assets/gallery-preview.png"
 	],
 	"pi": {

@@ -6,25 +6,53 @@ Notable changes to `pi-split-view`. Versioning is [SemVer](https://semver.org/).
 
 ### Added
 
+- The drawers view: Messages on top, pi's editor below it, then a Thinking drawer and a
+  Tool Usage drawer at the bottom of the screen. Each drawer is a one-row bar when
+  collapsed and a framed panel when open. A drawer opens on the first thinking block or
+  tool call, toggles with a click, `/split-thinking`, `/split-tools` or `/split-drawer`,
+  resizes by dragging its top border, and zooms with `[↗]`. The collapsed Tool Usage bar
+  carries the turn pager.
 - `responseSource` config and `/split-response-source [messages|transcript]`. With
   `transcript`, response-only mode draws pi's own transcript components minus tool calls
   and text-less assistant messages, instead of the response doc this extension builds. What
   other extensions draw in the transcript (markdown transformers, custom entries, custom
   messages) then renders and takes mouse input. The default, `messages`, is unchanged.
 
+### Changed
+
+- The drawers view is the only layout. It is on at startup unless pi runs with
+  `--no-split`, and `/split` toggles between it and the bare pi layout.
+- Config shape of `~/.pi/agent/ui-panels.json`. The keys are `toolMode`, `toolsScope`,
+  `trimResponse`, `responseSource`, `answerDivider`, `thinkingScope`, `thinkingMode`,
+  `thinkingHudMode` and a new top-level
+  `drawers: { thinking: { open, height }, tools: { open, height } }`. The keys `split`,
+  `thinking`, `tools`, `files`, `diff`, `slots`, `bandHeight`, `toolsWidthPct`,
+  `filesWidth`, `dockSide`, `layoutMode`, `layouts` and the boolean `thinkingHud` are
+  ignored. An existing file is not converted: drawer state saved under
+  `layouts.drawers` has to be moved to `drawers` by hand or saved again with
+  `/split-save`.
+
 ### Removed
 
-- The one-row file summary below the editor (`📂 53  a.ts · b.ts  +50`). The Files panel
-  (`/files`) shows the same files.
+- The grid layout: the top band of Thinking and Tool Usage panels, the dock column, and
+  the drag-resizes of the band height, the band split and the dock width.
+- Named slots and layout presets.
+- The commands `/split-preset`, `/split-slot`, `/split-dock-side`, `/split-height`,
+  `/split-tools-width`, `/files` and `/split-diff`, and the `position above|below`
+  argument of `/split-drawer`. The drawers are always below the editor.
+- The Files panel with its edit-diff subpanel, the regular-mode files overlay, and the
+  tracking of files that tools read and write.
+- The framed Messages panel and the `[×]` hide button of band panels. `[×]` on a zoomed
+  panel leaves the zoom.
+- The head+tail output preview of the band's Tool Usage panel. Tool output shows in the
+  tool cards.
+- The one-row file summary below the editor (`📂 53  a.ts · b.ts  +50`).
 
 ### Fixed
 
-- Files a `bash` command reads now show as `s` in the Files panel when the command
-  changes directory first (`cd dir && cat file`), names a path under `~`, or names it
-  through a variable set by a `name=value` assignment or a `for name in …` loop.
-- In the drawers layout, an open Thinking or Tool Usage drawer stays open at its height
-  when a prompt is submitted. A new turn closed each drawer that was not toggled by hand,
-  and the first thinking block or tool call opened it again.
+- An open Thinking or Tool Usage drawer stays open at its height when a prompt is
+  submitted. A new turn closed each drawer that was not toggled by hand, and the first
+  thinking block or tool call opened it again.
 
 ## [1.5.0] — 2026-11-12
 
