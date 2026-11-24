@@ -17,6 +17,15 @@ import { nodeIo, type TreeIo } from "./io.ts";
 import { type PaneBody, type PaneModel, TreePane } from "./pane.ts";
 import { basename, relative } from "./paths.ts";
 import { type Badge, type PaneTheme, renderRow, type RowContext, shimmer, TONE_TOOL } from "./rows.ts";
+import {
+	clampTreeWidth,
+	DEFAULT_TREE_WIDTH,
+	MIN_STACK_COLS,
+	MIN_TREE_COLS,
+	MIN_TREE_WIDTH,
+	paneWidthFor,
+	treeFits,
+} from "./viewport.ts";
 
 /** Saved state of the pane: shown or hidden, and its width in columns. */
 export interface TreeConfig {
@@ -27,32 +36,14 @@ export interface TreeConfig {
 /** Pane state as read from disk: only well-typed fields are present. */
 export type TreeConfigInput = Partial<TreeConfig>;
 
+export { MIN_TREE_COLS };
+
 export interface FileTreeHost {
 	/** World access; Node's fs, child_process and timers when absent. */
 	io?: TreeIo;
 	requestRender(): void;
 	terminalSize(): { cols: number; rows: number };
 	theme(): PaneTheme | null;
-}
-
-export const DEFAULT_TREE_WIDTH = 36;
-export const MIN_TREE_WIDTH = 24;
-export const MAX_TREE_WIDTH = 80;
-/** Columns the stack left of the pane keeps; the pane shrinks, then hides,
- * before the stack gets narrower than this. */
-export const MIN_STACK_COLS = 76;
-
-/** Narrowest terminal that shows the pane. */
-export const MIN_TREE_COLS = MIN_STACK_COLS + MIN_TREE_WIDTH;
-
-/** Clamp a requested pane width to the limits. */
-export function clampTreeWidth(width: number): number {
-	return Math.max(MIN_TREE_WIDTH, Math.min(MAX_TREE_WIDTH, Math.round(width)));
-}
-
-/** Whether a terminal of `cols` columns has room for the pane. */
-export function treeFits(cols: number): boolean {
-	return cols >= MIN_TREE_COLS;
 }
 
 /** The stack and the pane side by side. Its render() is a sentinel: the
@@ -88,7 +79,10 @@ export class FileTree {
 	private readonly pane: TreePane;
 	private readonly tree: TreeController;
 
-	constructor(private readonly host: FileTreeHost) {
+	private readonly host: FileTreeHost;
+
+	constructor(host: FileTreeHost) {
+		this.host = host;
 		this.tree = new TreeController(host.io ?? nodeIo(), {
 			changed: () => {
 				if (this.isVisible()) this.host.requestRender();
@@ -97,6 +91,8 @@ export class FileTree {
 		});
 		const model: PaneModel = {
 			theme: () => this.host.theme(),
+			widthOf: visibleWidth,
+			truncate: (text, width) => truncateToWidth(text, width),
 			height: () => this.host.terminalSize().rows,
 			header: () => this.header(),
 			footer: (width) => this.footer(width),
@@ -250,8 +246,7 @@ export class FileTree {
 	}
 
 	private setWidth(width: number): void {
-		const cols = this.host.terminalSize().cols;
-		this.width = Math.min(clampTreeWidth(width), Math.max(MIN_TREE_WIDTH, cols - MIN_STACK_COLS));
+		this.width = paneWidthFor(width, this.host.terminalSize().cols);
 		this.split?.setPaneWidth(this.pane, this.width);
 		this.host.requestRender();
 	}

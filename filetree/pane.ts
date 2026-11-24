@@ -4,13 +4,7 @@
  * mouse hit-testing; everything it shows comes from a PaneModel.
  */
 
-import {
-	type Component,
-	type TuiMouseEvent,
-	type TuiMouseEventResult,
-	truncateToWidth,
-	visibleWidth,
-} from "@earendil-works/pi-tui";
+import type { Component, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type { PaneTheme } from "./rows.ts";
 import { thumbOf } from "./viewport.ts";
 
@@ -28,6 +22,9 @@ export interface PaneBody {
 
 export interface PaneModel {
 	theme(): PaneTheme | null;
+	/** Display width of a styled string, and a styled string cut to a display width. */
+	widthOf(text: string): number;
+	truncate(text: string, width: number): string;
 	/** Rows the pane fills: the terminal height. */
 	height(): number;
 	/** Styled header label (after "Files"); "" when there is none. */
@@ -46,16 +43,21 @@ export interface PaneModel {
 /** Rows the frame takes: the top and bottom border. */
 export const FRAME_ROWS = 2;
 
-function padTo(line: string, width: number): string {
-	const clipped = visibleWidth(line) > width ? truncateToWidth(line, width) : line;
-	return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
-}
-
 export class TreePane implements Component {
 	private drag: { x: number; start: number; moved: boolean } | null = null;
 	private suppressClick = false;
 
-	constructor(private readonly model: PaneModel) {}
+	private readonly model: PaneModel;
+
+	constructor(model: PaneModel) {
+		this.model = model;
+	}
+
+	private padTo(line: string, width: number): string {
+		const m = this.model;
+		const clipped = m.widthOf(line) > width ? m.truncate(line, width) : line;
+		return clipped + " ".repeat(Math.max(0, width - m.widthOf(clipped)));
+	}
 
 	render(width: number): string[] {
 		const th = this.model.theme();
@@ -71,13 +73,13 @@ export class TreePane implements Component {
 			(body.above > 0 && body.below > 0 ? " " : "") +
 			(body.below > 0 ? `↓${body.below}` : "");
 		const right = counts ? th.fg("warning", ` ${counts} `) + border("─") : "";
-		const labelRoom = Math.max(0, inner - visibleWidth(right));
+		const labelRoom = Math.max(0, inner - this.model.widthOf(right));
 		const title = th.fg("accent", " Files") + this.model.header(Math.max(0, labelRoom - 7)) + " ";
-		const label = truncateToWidth(title, labelRoom);
+		const label = this.model.truncate(title, labelRoom);
 		const top =
 			border("╭") +
 			label +
-			border("─".repeat(Math.max(0, labelRoom - visibleWidth(label)))) +
+			border("─".repeat(Math.max(0, labelRoom - this.model.widthOf(label)))) +
 			right +
 			border("╮");
 
@@ -87,16 +89,16 @@ export class TreePane implements Component {
 			const isThumb = thumb !== null && i >= thumb.top && i < thumb.top + thumb.size;
 			out.push(
 				border("│") +
-					padTo(body.lines[i] ?? "", inner) +
+					this.padTo(body.lines[i] ?? "", inner) +
 					(isThumb ? th.fg("muted", "┃") : border("│")),
 			);
 		}
 
-		const foot = truncateToWidth(this.model.footer(inner), inner);
+		const foot = this.model.truncate(this.model.footer(inner), inner);
 		out.push(
 			border("╰") +
 				foot +
-				border("─".repeat(Math.max(0, inner - visibleWidth(foot)))) +
+				border("─".repeat(Math.max(0, inner - this.model.widthOf(foot)))) +
 				border("╯"),
 		);
 		return out;
