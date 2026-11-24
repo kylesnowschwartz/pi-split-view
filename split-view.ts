@@ -3343,9 +3343,7 @@ export default function (pi: ExtensionAPI) {
 		responseSource = cfg.responseSource;
 		// SV-14: arm the startup composition BEFORE reconstruct — the widget
 		// factory runs synchronously inside it and is the first point where the
-		// fullscreen root is available (before the first paint). The deferred
-		// timer below used to be the ONLY composition point, but it fires after
-		// the first paint, so the first screen never showed the saved panels.
+		// fullscreen root is available, so the drawers are in the first paint.
 		startupPending = ctx.mode === "tui";
 		reconstruct(ctx);
 		// Reapply the saved composition after the fullscreen root is ready.
@@ -3505,7 +3503,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("split", {
 		description:
-			"Toggle all panels: off = bare pi layout, on = saved startup defaults",
+			"Toggle the drawers view: off = bare pi layout, on = drawers with the saved state",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/split requires interactive mode", "error");
@@ -3524,7 +3522,7 @@ export default function (pi: ExtensionAPI) {
 				trimResponse = false;
 				zoomed = null;
 				reconcileLayout(ctx.ui.theme);
-				ctx.ui.notify("Split view off (all panels) · /split-save saves defaults", "info");
+				ctx.ui.notify("Split view off · /split-save saves defaults", "info");
 			} else {
 				const cfg = normalizeConfig(loadUiPanelsConfig());
 				drawers.setEnabled(true);
