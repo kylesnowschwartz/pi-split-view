@@ -19,7 +19,6 @@ import {
 } from "./layout-types.ts";
 
 export type DrawerId = "thinking" | "tools";
-export type DrawerPosition = "above" | "below";
 
 export interface DrawerState {
 	open: boolean;
@@ -202,8 +201,8 @@ class DrawerHeader implements Component {
 
 /**
  * Single-column collapsible drawers layout strategy.
- * Full-width Messages on top, collapsible Thinking + Tool Usage drawers in the
- * middle, and Pi's full-width prompt editor dock at the bottom.
+ * Full-width Messages on top, Pi's full-width prompt editor dock below it, and
+ * collapsible Thinking + Tool Usage drawers at the bottom of the screen.
  *
  * Each drawer is a real MeasurementSafeVStack ([LAYOUT_NODE] provider) with
  * permanent entries [DrawerHeader, ScrollView(visible: () => open), BorderBottom(visible: () => open)]
@@ -234,21 +233,12 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 	private lastCtx: LayoutContext | null = null;
 	private drag: DrawerDragState | null = null;
 	private suppressNextClick = false;
-	private position: DrawerPosition = "above";
 	private enabled = true;
 
 	constructor(
 		private readonly getTerminalSize: () => { cols: number; rows: number },
 		private readonly requestRender: () => void,
 	) {}
-
-	getPosition(): DrawerPosition {
-		return this.position;
-	}
-
-	setPosition(pos: DrawerPosition): void {
-		this.position = pos;
-	}
 
 	setEnabled(on: boolean): void {
 		this.enabled = on;
@@ -514,13 +504,8 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 				minSize: MIN_MESSAGES_ROWS,
 			},
 		];
-		if (this.position === "below") {
-			if (editorEntry) entries.push(editorEntry);
-			entries.push(...drawerEntries);
-		} else {
-			entries.push(...drawerEntries);
-			if (editorEntry) entries.push(editorEntry);
-		}
+		if (editorEntry) entries.push(editorEntry);
+		entries.push(...drawerEntries);
 
 		const stack = new VStack(entries);
 		this.geo.rootStack = stack;
@@ -534,7 +519,6 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 
 	serialize(): Record<string, unknown> {
 		return {
-			position: this.position,
 			thinking: {
 				open: this.drawers.thinking.open,
 				height: this.drawers.thinking.height,
@@ -549,7 +533,6 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 	hydrate(raw: unknown): void {
 		if (!raw || typeof raw !== "object") return;
 		const obj = raw as Record<string, unknown>;
-		this.position = obj.position === "below" ? "below" : "above";
 		for (const id of ["thinking", "tools"] as const) {
 			const item = obj[id];
 			if (!item || typeof item !== "object") continue;

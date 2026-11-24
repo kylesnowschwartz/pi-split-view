@@ -39,7 +39,6 @@ export type LayoutModeCfg = "grid" | "drawers";
 export type PresetName =
 	| "chat-left"
 	| "drawers"
-	| "drawers-below"
 	| "workbench"
 	| "sidebar-chat"
 	| "classic"
@@ -82,24 +81,6 @@ export const LAYOUT_PRESETS: Record<PresetName, LayoutPreset> = {
 		filesWidth: null,
 		layoutMode: "drawers",
 		layoutState: {
-			position: "above",
-			thinking: { open: false, height: 10 },
-			tools: { open: false, height: 14 },
-		},
-	},
-	"drawers-below": {
-		slots: {
-			topLeft: null,
-			topRight: null,
-			main: "messages",
-			dock: null,
-		},
-		bandHeight: 13,
-		toolsWidthPct: 50,
-		filesWidth: null,
-		layoutMode: "drawers",
-		layoutState: {
-			position: "below",
 			thinking: { open: false, height: 10 },
 			tools: { open: false, height: 14 },
 		},

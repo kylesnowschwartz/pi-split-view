@@ -460,11 +460,10 @@ test("normalizeConfig: explicit slots normalize, deduplicate, and sync flags", (
 	assert.equal(allBad.files, false);
 });
 
-test("LAYOUT_PRESETS: all 8 presets exist and normalize cleanly", () => {
+test("LAYOUT_PRESETS: all 7 presets exist and normalize cleanly", () => {
 	const names: PresetName[] = [
 		"chat-left",
 		"drawers",
-		"drawers-below",
 		"classic",
 		"workbench",
 		"sidebar-chat",

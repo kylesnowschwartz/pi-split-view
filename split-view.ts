@@ -4558,7 +4558,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("split-drawer", {
-		description: "Toggle a drawer or set drawer position: thinking | tools | position [above|below]",
+		description: "Toggle a drawer: thinking | tools",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") return;
 			const parts = String(args ?? "")
@@ -4571,18 +4571,6 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Switch to drawers mode first: /split-preset drawers", "info");
 				return;
 			}
-			if (arg === "position") {
-				const next =
-					parts[1] === "above" || parts[1] === "below"
-						? parts[1]
-						: drawersStrategy.getPosition() === "above"
-							? "below"
-							: "above";
-				drawersStrategy.setPosition(next);
-				reconcileLayout(ctx.ui.theme);
-				ctx.ui.notify(`Drawer position: ${next} prompt`, "info");
-				return;
-			}
 			if (arg === "thinking" || arg === "tools") {
 				drawersStrategy.toggleDrawer(arg);
 				const st = drawersStrategy.getDrawerState(arg);
@@ -4592,7 +4580,7 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
-			ctx.ui.notify("Usage: /split-drawer <thinking|tools|position [above|below]>", "info");
+			ctx.ui.notify("Usage: /split-drawer <thinking|tools>", "info");
 		},
 	});
 
@@ -4752,11 +4740,7 @@ export default function (pi: ExtensionAPI) {
 	const PRESET_OPTIONS: { name: PresetName; label: string }[] = [
 		{
 			name: "drawers",
-			label: "drawers — Full-width Messages · collapsible Thinking & Tools drawers above prompt",
-		},
-		{
-			name: "drawers-below",
-			label: "drawers-below — Full-width Messages · prompt · collapsible drawers below prompt",
+			label: "drawers — Full-width Messages · prompt · collapsible Thinking & Tools drawers below prompt",
 		},
 		{
 			name: "chat-left",
@@ -4786,7 +4770,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("split-preset", {
 		description:
-			"Apply a layout preset (drawers | drawers-below | chat-left | workbench | sidebar-chat | classic | deep-think | focused-tools)",
+			"Apply a layout preset (drawers | chat-left | workbench | sidebar-chat | classic | deep-think | focused-tools)",
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/split-preset requires interactive mode", "error");
