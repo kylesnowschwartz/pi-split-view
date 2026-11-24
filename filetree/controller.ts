@@ -351,13 +351,14 @@ export class TreeController {
 	}
 
 	/** The row a path shows on: the path itself when it is listed, else the
-	 * nearest listed folder above it; "" when that is the root or outside it. */
+	 * nearest listed folder above it, else the root (which the header stands
+	 * for); "" for a path outside the root. */
 	rowIdOf(path: string): string {
-		if (!inside(this.root, path) || path === this.root) return "";
+		if (!inside(this.root, path)) return "";
 		const known = this.nodeIds();
 		if (known.has(path)) return path;
 		for (const dir of ancestorsOf(path, this.root)) if (known.has(dir)) return dir;
-		return "";
+		return this.root;
 	}
 
 	private idsAt = -1;
@@ -532,7 +533,7 @@ export class TreeController {
 		if (key === this.marksAt) return this.marksCache;
 		const out = new Map<string, PathMark>();
 		for (const m of this.activity.marks(this.io.clock.now())) {
-			const id = m.path === this.root ? this.root : this.rowIdOf(m.path);
+			const id = this.rowIdOf(m.path);
 			if (!id) continue;
 			const cur = out.get(id);
 			if (cur && cur.state === "running" && m.state !== "running") continue;

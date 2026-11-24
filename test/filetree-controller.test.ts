@@ -59,7 +59,8 @@ test("reveal lists the folders above a path, and never a pruned folder", async (
 	assert.equal(tree.rowIdOf("/r/src/deep/missing.ts"), "/r/src/deep");
 	assert.equal(tree.rowIdOf("/r/node_modules/pkg/index.js"), "/r/node_modules");
 	assert.equal(tree.rowIdOf("/elsewhere/x"), "");
-	assert.equal(tree.rowIdOf("/r"), "");
+	assert.equal(tree.rowIdOf("/r"), "/r");
+	assert.equal(tree.rowIdOf("/r/no/such/x.ts"), "/r");
 });
 
 test("a sync keeps an open folder open and shows the entries added to it", async () => {
