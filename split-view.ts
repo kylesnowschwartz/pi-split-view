@@ -148,6 +148,7 @@ import {
 	type PanelId,
 } from "./layout-types.ts";
 import { DrawersLayout } from "./layout-drawers.ts";
+import { FileTree, MIN_TREE_COLS } from "./filetree/index.ts";
 import {
 	alignTurnSpans,
 	appendStreamTail,
@@ -1025,6 +1026,16 @@ const drawers = new DrawersLayout(
 	}),
 	() => requestRender(),
 );
+
+/** The file tree pane: a right column beside the drawers layout. */
+const fileTree = new FileTree({
+	requestRender: () => requestRender(),
+	terminalSize: () => ({
+		cols: tuiRef?.terminal?.columns ?? 120,
+		rows: tuiRef?.terminal?.rows ?? 40,
+	}),
+	theme: () => themeGetter?.() ?? null,
+});
 
 /** Re-apply layout geometry in place on resize or state mutation. */
 function applyGeometry(): void {
@@ -3080,8 +3091,14 @@ function summarizeDrawerPanel(id: "thinking" | "tools"): {
 	};
 }
 
-/** Build the composed layout root: the zoomed panel, or the drawers layout. */
+/** Build the composed layout root: the stack (the zoomed panel, or the
+ * drawers layout) with the file tree pane to its right. A zoomed panel
+ * covers the stack only; the pane stays. */
 function composeLayout(theme: Theme): Component {
+	return fileTree.wrap(composeStack(theme));
+}
+
+function composeStack(theme: Theme): Component {
 	drawers.resetGeometry();
 	toolsScroll = null;
 	thinkingBody = null;
@@ -3143,6 +3160,7 @@ function reconcileLayout(theme: Theme): void {
 	if (zoomed && !drawers.isEnabled()) zoomed = null;
 	if (!drawers.isEnabled() || !tuiRef || typeof tuiRef.setLayoutRoot !== "function") {
 		if (isLayoutLayerActive("ui")) setLayoutLayer("ui", null);
+		fileTree.unwrap();
 		return;
 	}
 	setLayoutLayer("ui", () => composeLayout(theme));
@@ -3331,6 +3349,7 @@ export default function (pi: ExtensionAPI) {
 		const noSplit = Boolean(pi.getFlag("no-split"));
 		drawers.setEnabled(!noSplit);
 		drawers.hydrate(cfg.drawers);
+		fileTree.hydrate(cfg.tree);
 		thinkingScope = cfg.thinkingScope;
 		thinkingMode = cfg.thinkingMode;
 		thinkingHudMode = cfg.thinkingHudMode;
@@ -3497,6 +3516,7 @@ export default function (pi: ExtensionAPI) {
 			startupTimer = null;
 		}
 		if (isLayoutLayerActive("ui")) setLayoutLayer("ui", null);
+		fileTree.unwrap();
 		ctx.ui.setWidget(WIDGET_KEY, undefined);
 		widgetSet = false;
 	});
@@ -3527,11 +3547,32 @@ export default function (pi: ExtensionAPI) {
 				const cfg = normalizeConfig(loadUiPanelsConfig());
 				drawers.setEnabled(true);
 				drawers.hydrate(cfg.drawers);
+				fileTree.hydrate(cfg.tree);
 				const base = getBaseRoot();
 				if (base && baseDockOf(base)) trimResponse = true;
 				reconcileLayout(ctx.ui.theme);
 				ctx.ui.notify("Split view on (saved layout) · /split-save saves defaults", "info");
 			}
+		},
+	});
+
+	pi.registerCommand("split-tree", {
+		description: "Toggle the file tree pane on the right",
+		handler: async (_args, ctx) => {
+			if (!anyPanelActive()) {
+				ctx.ui.notify("/split-tree needs the split view (fullscreen, /split on)", "warning");
+				return;
+			}
+			fileTree.setOpen(!fileTree.isOpen());
+			const cols = tuiRef?.terminal?.columns ?? 120;
+			ctx.ui.notify(
+				!fileTree.isOpen()
+					? "File tree hidden"
+					: fileTree.isVisible()
+						? "File tree shown"
+						: `File tree on (hidden: the terminal is ${cols} columns wide, it needs ${MIN_TREE_COLS})`,
+				"info",
+			);
 		},
 	});
 
@@ -3890,6 +3931,7 @@ export default function (pi: ExtensionAPI) {
 				thinkingMode,
 				thinkingHudMode,
 				drawers: drawers.serialize(),
+				tree: fileTree.serialize(),
 				answerDivider: answerDividerMode,
 				responseSource,
 			});

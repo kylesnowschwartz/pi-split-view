@@ -1,6 +1,6 @@
 /**
  * ui-panels-config.ts — persistent config for the split-view extension
- * (Thinking / Tool Usage drawers, Messages options). Stored at
+ * (Thinking / Tool Usage drawers, file tree pane, Messages options). Stored at
  * ~/.pi/agent/ui-panels.json.
  *
  * Defaults: both drawers start collapsed. `toolMode` defaults to "compact".
@@ -17,6 +17,7 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ToolsScope } from "./helpers.ts";
+import type { TreeConfigInput } from "./filetree/index.ts";
 
 export type { ToolsScope };
 
@@ -80,6 +81,9 @@ export interface UiPanelsConfig {
 	/** Drawer state at startup. Absent drawers start collapsed at their
 	 * default height. */
 	drawers?: DrawersConfigInput;
+	/** File tree pane at startup: `{ open, width }`. Absent: shown at its
+	 * default width. */
+	tree?: TreeConfigInput;
 }
 
 /** SV-12: strict boolean read — only real booleans count; absent or
@@ -101,6 +105,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 	trimResponse: boolean;
 	responseSource: ResponseSource;
 	drawers: DrawersConfigInput;
+	tree: TreeConfigInput;
 }> {
 	// SV-12: tolerate any shape — a null root, an array or a primitive reads
 	// as an empty config instead of throwing on property access.
@@ -131,6 +136,15 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		}
 	}
 
+	// Same strict read for the file tree pane; the pane clamps the width.
+	const tree: TreeConfigInput = {};
+	const rawTree: unknown = root.tree;
+	if (rawTree && typeof rawTree === "object" && !Array.isArray(rawTree)) {
+		const rec = rawTree as Record<string, unknown>;
+		if (typeof rec.open === "boolean") tree.open = rec.open;
+		if (typeof rec.width === "number" && Number.isFinite(rec.width)) tree.width = rec.width;
+	}
+
 	return {
 		answerDivider: root.answerDivider === "space" ? "space" : "rule",
 		toolMode: tm,
@@ -147,6 +161,7 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		// Strict read: only the literal "transcript" opts in.
 		responseSource: root.responseSource === "transcript" ? "transcript" : "messages",
 		drawers,
+		tree,
 	};
 }
 

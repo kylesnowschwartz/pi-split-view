@@ -31,6 +31,7 @@
 		"layout-types.ts",
 		"layout-drawers.ts",
 		"ui-panels-config.ts",
+		"filetree",
 		"README.md",
 		"CHANGELOG.md",
 		"LICENSE",
