@@ -7,16 +7,12 @@ import {
 	VStack,
 } from "@earendil-works/pi-tui";
 
-/** Built-in layout strategy identifiers. */
-export type LayoutMode = "drawers";
-
 /** Framed panel identifiers (the two drawers, also zoomable). */
 export type PanelId = "thinking" | "tools";
 
 /**
- * Neutral mouse & sizing wiring of one panel.
- * Panel chrome calls `onEdgePress` / `onDragEvent` without knowing which
- * layout strategy is active or what drag semantics it uses.
+ * Mouse & sizing wiring of one panel. Panel chrome calls `onDragEvent`
+ * without knowing the drawer drag semantics.
  */
 export interface PanelCtl {
 	id: PanelId;
@@ -24,7 +20,7 @@ export interface PanelCtl {
 	scroll?: ScrollView;
 	/** Optional initial minRows estimate before viewportHeight is known. */
 	minRows?: () => number;
-	/** Active drag continuation / release hook owned by the active LayoutStrategy. */
+	/** Active drag continuation / release hook owned by the drawers layout. */
 	onDragEvent?: (ev: TuiMouseEvent) => TuiMouseEventResult | undefined;
 }
 
@@ -35,64 +31,33 @@ export interface PanelSummary {
 	errorCount: number;
 }
 
-/** Narrow context passed from split-view.ts into LayoutStrategy.compose(). */
+/** Narrow context passed from split-view.ts into DrawersLayout.compose(). */
 export interface LayoutContext {
 	theme: Theme;
-	base: Component | null;
-	inner: Component;
 	editorDock: Component | null;
-	hasFullscreenLayout: boolean;
-	trimResponse: boolean;
 	cols: number;
 	rows: number;
 	/** The Messages region (pi's transcript or the response-only view). */
 	buildMessages(): Component;
-	buildBodyScroll?(
-		id: "thinking" | "tools",
+	buildBodyScroll(
+		id: PanelId,
 		ctl: PanelCtl,
 	): { scroll: ScrollView; bottom: Component; reattach: () => void };
-	panelSummary?(id: "thinking" | "tools"): PanelSummary;
-	toggleZoom?(id: PanelId): void;
-	pagerState?(): {
+	panelSummary(id: PanelId): PanelSummary;
+	toggleZoom(id: PanelId): void;
+	pagerState(): {
 		currentTurn: number;
 		label: string;
 		canPrev: boolean;
 		canNext: boolean;
 		isAll: boolean;
 		pinned: boolean;
-		liveShown: boolean;
-		liveOn: boolean;
 	};
-	stepTurn?(delta: -1 | 1): void;
-	toggleToolsScopeAll?(): void;
-	toggleToolsLive?(): void;
-	isMessagesFollowingEnd?(): boolean;
-	getMessagesViewportHeight?(): number;
-	isTurnPinned?(): boolean;
-	requestRender(): void;
-}
-
-/**
- * Pluggable layout strategy seam.
- * Each layout owns its own geometry refs, drag state, visibility rules, and
- * opaque persisted config so experimental layouts can be added or deleted
- * cleanly without untangling split-view.ts.
- */
-export interface LayoutStrategy {
-	readonly id: LayoutMode;
-	compose(ctx: LayoutContext): Component;
-	applyGeometry(cols: number, rows: number): void;
-	panelVisible(id: PanelId, hasFullscreenLayout: boolean): boolean;
-	wantsLayer(): boolean;
-	hasActiveDrag(): boolean;
-	handleDragEvent(ev: TuiMouseEvent): TuiMouseEventResult | undefined;
-	cancelDrag(): void;
-	resetGeometry(): void;
-	onThinkingStart?(): void;
-	onToolStart?(isError?: boolean): void;
-	onReconstruct?(): void;
-	serialize?(): Record<string, unknown>;
-	hydrate?(raw: unknown): void;
+	stepTurn(delta: -1 | 1): void;
+	toggleToolsScopeAll(): void;
+	isMessagesFollowingEnd(): boolean;
+	getMessagesViewportHeight(): number;
+	isTurnPinned(): boolean;
 }
 
 /**

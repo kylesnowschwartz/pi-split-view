@@ -143,12 +143,11 @@ import {
 } from "./layout-manager.ts";
 import {
 	type LayoutContext,
-	type LayoutStrategy,
 	MeasurementSafeVStack,
 	type PanelCtl,
 	type PanelId,
 } from "./layout-types.ts";
-import { DrawersLayoutStrategy } from "./layout-drawers.ts";
+import { DrawersLayout } from "./layout-drawers.ts";
 import {
 	alignTurnSpans,
 	appendStreamTail,
@@ -1089,8 +1088,6 @@ function requestRender(): void {
 }
 
 const anyPanelActive = () => isLayoutLayerActive("ui");
-/** /split state: the drawers layer is wanted. */
-const panelsActive = () => drawersStrategy.wantsLayer();
 
 // ─── mouse: drag-resize, header buttons, wheel routing ───────────────────────
 
@@ -1102,7 +1099,8 @@ let composedTermRows = -1;
 let themeGetter: (() => Theme) | null = null;
 let notifyFn: ((msg: string, level: "info" | "warning") => void) | null = null;
 
-const drawersStrategy = new DrawersLayoutStrategy(
+/** The drawers layout: owns drawer state, geometry and drag handling. */
+const drawers = new DrawersLayout(
 	() => ({
 		cols: tuiRef?.terminal?.columns ?? 120,
 		rows: tuiRef?.terminal?.rows ?? 40,
@@ -1110,17 +1108,13 @@ const drawersStrategy = new DrawersLayoutStrategy(
 	() => requestRender(),
 );
 
-function activeStrategy(): LayoutStrategy {
-	return drawersStrategy;
-}
-
 /** Re-apply layout geometry in place on resize or state mutation. */
 function applyGeometry(): void {
 	const cols = tuiRef?.terminal?.columns ?? 120;
 	const rows = tuiRef?.terminal?.rows ?? 40;
 	composedTermCols = cols;
 	composedTermRows = rows;
-	activeStrategy().applyGeometry(cols, rows);
+	drawers.applyGeometry(cols, rows);
 }
 
 /** Header buttons occupy the 6 columns before the right corner, when the
@@ -1323,9 +1317,8 @@ function panelMouse(
 	ctl: PanelCtl | undefined,
 	where: "top" | "bottom" | "body",
 ): TuiMouseEventResult | undefined {
-	const strat = activeStrategy();
-	if (strat.hasActiveDrag() && (ev.type === "drag" || ev.type === "release")) {
-		return ctl?.onDragEvent?.(ev) ?? strat.handleDragEvent(ev);
+	if (drawers.hasActiveDrag() && (ev.type === "drag" || ev.type === "release")) {
+		return ctl?.onDragEvent?.(ev) ?? drawers.handleDragEvent(ev);
 	}
 	if (!ctl) return undefined;
 	if (ev.type === "wheel") {
@@ -2817,14 +2810,6 @@ function buildMessages(theme: Theme, base: Component | null): Component {
 	return msgScroll;
 }
 
-/** Whether a panel is zoomable: the drawers view is on. */
-function panelOn(id: PanelId): boolean {
-	return activeStrategy().panelVisible(
-		id,
-		typeof tuiRef?.setLayoutRoot === "function",
-	);
-}
-
 /** D1: one panel over the whole area above pi's editor dock (reused verbatim,
  * like trim mode); the rest of the layout is hidden until the zoom is restored. */
 function buildZoom(theme: Theme, id: PanelId): Component | null {
@@ -3175,10 +3160,9 @@ function summarizeDrawerPanel(id: "thinking" | "tools"): {
 	};
 }
 
-/** Build the full composed layout root via the active LayoutStrategy. */
-function composeLayout(theme: Theme, inner: Component): Component {
-	const strat = activeStrategy();
-	strat.resetGeometry();
+/** Build the composed layout root: the zoomed panel, or the drawers layout. */
+function composeLayout(theme: Theme): Component {
+	drawers.resetGeometry();
 	toolsScroll = null;
 	thinkingBody = null;
 	messagesScrollRef = null;
@@ -3186,7 +3170,7 @@ function composeLayout(theme: Theme, inner: Component): Component {
 	const rows = tuiRef?.terminal?.rows ?? 40;
 	composedTermCols = cols;
 	composedTermRows = rows;
-	if (zoomed && panelOn(zoomed)) {
+	if (zoomed && drawers.isEnabled()) {
 		const z = buildZoom(theme, zoomed);
 		if (z) return z;
 	}
@@ -3194,13 +3178,7 @@ function composeLayout(theme: Theme, inner: Component): Component {
 	const editorDock = base ? baseDockOf(base) : null;
 	const ctx: LayoutContext = {
 		theme,
-		base,
-		inner,
 		editorDock,
-		hasFullscreenLayout: Boolean(
-			tuiRef && typeof tuiRef.setLayoutRoot === "function",
-		),
-		trimResponse,
 		cols,
 		rows,
 		buildMessages: () => buildMessages(theme, base),
@@ -3228,31 +3206,26 @@ function composeLayout(theme: Theme, inner: Component): Component {
 				canNext,
 				isAll: toolsScope === "all" && pinnedTurn === null,
 				pinned: pinnedTurn !== null,
-				liveShown: liveButtonVisible(),
-				liveOn: liveToolId !== null,
 			};
 		},
 		stepTurn: (delta) => stepTurn(delta),
 		toggleToolsScopeAll: () => toggleToolsScopeAll(),
-		toggleToolsLive: () => toggleToolsLive(),
 		isMessagesFollowingEnd: () => messagesScrollRef?.isFollowingEnd ?? true,
 		getMessagesViewportHeight: () => messagesScrollRef?.viewportHeight ?? 0,
 		isTurnPinned: () => pinnedTurn !== null,
-		requestRender: () => requestRender(),
 	};
-	return strat.compose(ctx);
+	return drawers.compose(ctx);
 }
 
-/** Reconcile the single "ui" layout layer with the active LayoutStrategy. */
+/** Reconcile the single "ui" layout layer with the drawers on/off state. */
 function reconcileLayout(theme: Theme): void {
-	activeStrategy().cancelDrag();
-	if (zoomed && !panelOn(zoomed)) zoomed = null;
-	const wantAny = activeStrategy().wantsLayer();
-	if (!wantAny || !tuiRef || typeof tuiRef.setLayoutRoot !== "function") {
+	drawers.cancelDrag();
+	if (zoomed && !drawers.isEnabled()) zoomed = null;
+	if (!drawers.isEnabled() || !tuiRef || typeof tuiRef.setLayoutRoot !== "function") {
 		if (isLayoutLayerActive("ui")) setLayoutLayer("ui", null);
 		return;
 	}
-	setLayoutLayer("ui", (inner: Component) => composeLayout(theme, inner));
+	setLayoutLayer("ui", () => composeLayout(theme));
 	// SV-08: remember the theme this composition was built with.
 	composedThemeFp = themeFingerprint(theme);
 }
@@ -3299,7 +3272,7 @@ export default function (pi: ExtensionAPI) {
 						if (composedThemeFp === null) composedThemeFp = fp;
 						else if (fp !== composedThemeFp) {
 							composedThemeFp = fp;
-							drawersStrategy.clearScrollCache();
+							drawers.clearScrollCache();
 							if (anyPanelActive()) {
 								rebuildResponseDoc(ctx);
 								reconcileLayout(liveTheme);
@@ -3343,7 +3316,7 @@ export default function (pi: ExtensionAPI) {
 		lastVisibleTurnsKey = "";
 		lastMessagesScrollTop = -1;
 		suppressNextPinClear = false;
-		activeStrategy().onReconstruct?.();
+		drawers.onReconstruct();
 		toolsVersionCounter++;
 		rebuildResponseDoc(ctx);
 
@@ -3436,9 +3409,9 @@ export default function (pi: ExtensionAPI) {
 		const cfg = normalizeConfig(loadUiPanelsConfig());
 		// --no-split: start bare, ignoring the saved ui-panels.json layout.
 		const noSplit = Boolean(pi.getFlag("no-split"));
-		drawersStrategy.setEnabled(!noSplit);
+		drawers.setEnabled(!noSplit);
 		if (cfg.layouts.drawers) {
-			drawersStrategy.hydrate(cfg.layouts.drawers);
+			drawers.hydrate(cfg.layouts.drawers);
 		}
 		thinkingScope = cfg.thinkingScope;
 		thinkingMode = cfg.thinkingMode;
@@ -3489,7 +3462,7 @@ export default function (pi: ExtensionAPI) {
 		if (d) {
 			if (d.type === "thinking_start") {
 				thinking.start();
-				activeStrategy().onThinkingStart?.();
+				drawers.onThinkingStart();
 			} else if (d.type === "thinking_delta") thinking.append(d.delta ?? "");
 			else if (d.type === "thinking_end") thinking.end(d.content ?? "");
 		}
@@ -3534,7 +3507,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_execution_start", (event) => {
 		// SV-17: same ingest path the branch rebuild uses.
 		ingestToolCall(event.toolCallId, event.toolName, event.args, Date.now());
-		activeStrategy().onToolStart?.(false);
+		drawers.onToolStart();
 		if (anyPanelActive()) requestRender();
 	});
 	pi.on("tool_execution_update", (event) => {
@@ -3602,7 +3575,7 @@ export default function (pi: ExtensionAPI) {
 		aiRefiner.clear();
 		lastCtx = null;
 		stopToolTicker();
-		activeStrategy().cancelDrag();
+		drawers.cancelDrag();
 		if (startupTimer) {
 			clearTimeout(startupTimer);
 			startupTimer = null;
@@ -3627,17 +3600,17 @@ export default function (pi: ExtensionAPI) {
 			// OFF restores pi's native layout (no drawers, no response-only
 			// swap). ON brings the drawers back with the drawer state saved as
 			// startup defaults (ui-panels.json, written by /split-save).
-			const wasOn = panelsActive();
+			const wasOn = drawers.isEnabled();
 			if (wasOn) {
-				drawersStrategy.setEnabled(false);
+				drawers.setEnabled(false);
 				trimResponse = false;
 				zoomed = null;
 				reconcileLayout(ctx.ui.theme);
 				ctx.ui.notify("Split view off (all panels) · /split-save saves defaults", "info");
 			} else {
 				const cfg = normalizeConfig(loadUiPanelsConfig());
-				drawersStrategy.setEnabled(true);
-				if (cfg.layouts.drawers) drawersStrategy.hydrate(cfg.layouts.drawers);
+				drawers.setEnabled(true);
+				if (cfg.layouts.drawers) drawers.hydrate(cfg.layouts.drawers);
 				const base = getBaseRoot();
 				if (base && baseDockOf(base)) trimResponse = true;
 				reconcileLayout(ctx.ui.theme);
@@ -3650,8 +3623,8 @@ export default function (pi: ExtensionAPI) {
 		description: "Toggle the Thinking drawer open/closed",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") return;
-			drawersStrategy.toggleDrawer("thinking");
-			const st = drawersStrategy.getDrawerState("thinking");
+			drawers.toggleDrawer("thinking");
+			const st = drawers.getDrawerState("thinking");
 			ctx.ui.notify(`Thinking drawer ${st.open ? "expanded" : "collapsed"}`, "info");
 		},
 	});
@@ -3719,8 +3692,8 @@ export default function (pi: ExtensionAPI) {
 		description: "Toggle the Tool Usage drawer open/closed",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") return;
-			drawersStrategy.toggleDrawer("tools");
-			const st = drawersStrategy.getDrawerState("tools");
+			drawers.toggleDrawer("tools");
+			const st = drawers.getDrawerState("tools");
 			ctx.ui.notify(`Tools drawer ${st.open ? "expanded" : "collapsed"}`, "info");
 		},
 	});
@@ -3736,8 +3709,8 @@ export default function (pi: ExtensionAPI) {
 				.filter(Boolean);
 			const arg = parts[0] ?? "";
 			if (arg === "thinking" || arg === "tools") {
-				drawersStrategy.toggleDrawer(arg);
-				const st = drawersStrategy.getDrawerState(arg);
+				drawers.toggleDrawer(arg);
+				const st = drawers.getDrawerState(arg);
 				ctx.ui.notify(
 					`${arg === "thinking" ? "Thinking" : "Tools"} drawer ${st.open ? "expanded" : "collapsed"}`,
 					"info",
@@ -4002,7 +3975,7 @@ export default function (pi: ExtensionAPI) {
 				thinkingHud: thinkingHudMode !== "off",
 				thinkingHudMode,
 				layouts: {
-					drawers: drawersStrategy.serialize(),
+					drawers: drawers.serialize(),
 				},
 				answerDivider: answerDividerMode,
 				responseSource,

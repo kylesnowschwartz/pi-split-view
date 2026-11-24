@@ -11,10 +11,8 @@ import {
 import { computeDrawerHeights, drawerBarLayout } from "./helpers.ts";
 import {
 	type LayoutContext,
-	type LayoutStrategy,
 	MeasurementSafeVStack,
 	type PanelCtl,
-	type PanelId,
 	stackEntry,
 } from "./layout-types.ts";
 
@@ -71,7 +69,7 @@ class DrawerHeader implements Component {
 	private computeLayout(width: number) {
 		const st = this.getState();
 		const pager =
-			!st.open && this.id === "tools" ? this.ctx.pagerState?.() : undefined;
+			!st.open && this.id === "tools" ? this.ctx.pagerState() : undefined;
 		const showPager = Boolean(pager && pager.currentTurn > 0);
 		const glyph = st.open ? "▾" : "▸";
 		return {
@@ -89,11 +87,7 @@ class DrawerHeader implements Component {
 	render(width: number): string[] {
 		const th = this.theme;
 		const { st, pager, bar } = this.computeLayout(width);
-		const summary = this.ctx.panelSummary?.(this.id) ?? {
-			text: "",
-			streaming: false,
-			errorCount: 0,
-		};
+		const summary = this.ctx.panelSummary(this.id);
 		const glyph = st.open ? "▾" : "▸";
 		const dot = summary.streaming ? th.fg("warning", " ●") : "";
 		const summaryText = summary.text
@@ -174,19 +168,19 @@ class DrawerHeader implements Component {
 		if (ev.type === "click") {
 			if (this.consumeSuppressedClick()) return { handled: true };
 			if (isZoom) {
-				this.ctx.toggleZoom?.(this.id);
+				this.ctx.toggleZoom(this.id);
 				return { handled: true };
 			}
 			if (isPrev) {
-				this.ctx.stepTurn?.(-1);
+				this.ctx.stepTurn(-1);
 				return { handled: true };
 			}
 			if (isNext) {
-				this.ctx.stepTurn?.(1);
+				this.ctx.stepTurn(1);
 				return { handled: true };
 			}
 			if (isPagerToggle) {
-				this.ctx.toggleToolsScopeAll?.();
+				this.ctx.toggleToolsScopeAll();
 				return { handled: true };
 			}
 			this.onToggle();
@@ -200,7 +194,7 @@ class DrawerHeader implements Component {
 }
 
 /**
- * Single-column collapsible drawers layout strategy.
+ * Single-column collapsible drawers layout.
  * Full-width Messages on top, Pi's full-width prompt editor dock below it, and
  * collapsible Thinking + Tool Usage drawers at the bottom of the screen.
  *
@@ -209,9 +203,7 @@ class DrawerHeader implements Component {
  * so pi-tui natively manages scrolling, scrollbars, and scroll preservation
  * across collapse/expand without tree rebuilds.
  */
-export class DrawersLayoutStrategy implements LayoutStrategy {
-	readonly id = "drawers" as const;
-
+export class DrawersLayout {
 	private drawers: Record<DrawerId, DrawerState> = {
 		thinking: { open: false, manualPin: false, height: DEFAULT_THINKING_HEIGHT },
 		tools: { open: false, manualPin: false, height: DEFAULT_TOOLS_HEIGHT },
@@ -280,11 +272,7 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 		return this.drag !== null;
 	}
 
-	panelVisible(_id: PanelId, _hasFullscreenLayout: boolean): boolean {
-		return this.enabled;
-	}
-
-	wantsLayer(): boolean {
+	isEnabled(): boolean {
 		return this.enabled;
 	}
 
@@ -299,11 +287,8 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 
 	private shouldSuppressAutoOpen(): boolean {
 		if (!this.lastCtx) return false;
-		if (this.lastCtx.isTurnPinned?.()) return true;
-		if (this.lastCtx.isMessagesFollowingEnd && !this.lastCtx.isMessagesFollowingEnd()) {
-			return true;
-		}
-		return false;
+		if (this.lastCtx.isTurnPinned()) return true;
+		return !this.lastCtx.isMessagesFollowingEnd();
 	}
 
 	onThinkingStart(): void {
@@ -314,7 +299,7 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 		this.applyGeometry(cols, rows);
 	}
 
-	onToolStart(_isError?: boolean): void {
+	onToolStart(): void {
 		const st = this.drawers.tools;
 		if (st.open || st.manualPin || this.shouldSuppressAutoOpen()) return;
 		st.open = true;
@@ -348,7 +333,7 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 		}
 		d.moved = true;
 		const { cols, rows } = this.getTerminalSize();
-		const msgVp = this.lastCtx?.getMessagesViewportHeight?.() ?? 0;
+		const msgVp = this.lastCtx?.getMessagesViewportHeight() ?? 0;
 		const dynamicMax =
 			msgVp > 0
 				? Math.max(MIN_DRAWER_HEIGHT, d.start + msgVp - MIN_MESSAGES_ROWS)
@@ -403,10 +388,10 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 			onDragEvent: (ev) => this.handleDragEvent(ev),
 		};
 		let pair = this.cachedScrolls[id];
-		if (!pair && ctx.buildBodyScroll) {
+		if (!pair) {
 			pair = ctx.buildBodyScroll(id, ctl);
 			this.cachedScrolls[id] = pair;
-		} else if (pair) {
+		} else {
 			ctl.scroll = pair.scroll;
 			pair.reattach();
 		}
