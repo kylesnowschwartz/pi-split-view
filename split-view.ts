@@ -97,7 +97,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
-	HStack,
 	Image,
 	ScrollView,
 	Spacer,
@@ -117,13 +116,6 @@ import {
 	loadUiPanelsConfig,
 	saveUiPanelsConfig,
 	normalizeConfig,
-	assignSlot,
-	LAYOUT_PRESETS,
-	type LayoutSlots,
-	type PresetName,
-	type SlotName,
-	type SlotPanel,
-	type DockSide,
 	type ToolMode as ToolModeCfg,
 	type ThinkingScope,
 	type ThinkingMode,
@@ -153,19 +145,16 @@ import {
 } from "./layout-manager.ts";
 import {
 	type LayoutContext,
-	type LayoutMode,
 	type LayoutStrategy,
 	MeasurementSafeVStack,
 	type PanelCtl,
 	type PanelId,
 } from "./layout-types.ts";
-import { GridLayoutStrategy } from "./layout-grid.ts";
 import { DrawersLayoutStrategy } from "./layout-drawers.ts";
 import {
 	alignTurnSpans,
 	appendStreamTail,
 	bashPathCandidates,
-	bandToolsColsFor as bandToolsColsForPct,
 	capDisplayLine,
 	capToolText,
 	dockColsFor as dockColsForManual,
@@ -228,10 +217,6 @@ const MAX_UNWINDOWED_ROWS = MAX_BODY_ROWS * 4;
 // Hard cap on raw chars per logical line (giant-line guard). ≥ MAX_TAIL_CHARS
 // so the streaming tail is never cut by a sliding (re-flowing) window.
 const MAX_LINE_CHARS = MAX_TAIL_CHARS;
-/** Rows the transcript + editor need below the band; shorter terminals hide
- * the band (B2) instead of squeezing the transcript. */
-const MIN_ROWS_BELOW_BAND = 12;
-
 /** Legend shown at the bottom of the files list. */
 const LEGEND = "r read · w write · s seen(bash) · a subagent";
 
@@ -265,8 +250,6 @@ const MY_GEN = ++REG.gen;
 /** Terminal height, captured by the overlay's visible callback each render. */
 let termHeight = 0;
 
-// Panel enable flags (kept in sync with config; thinking/tools default true).
-let thinkingOn = true;
 /** SV-27: "turn" = the thinking panel carries the current turn only (the
  * buffer is cleared on each new user message); "session" = accumulate every
  * turn (default, the pre-SV-27 behaviour). Session-local;
@@ -306,10 +289,6 @@ function enqueueRecentThinkingLines(maxLines = 8): void {
 		enqueueThinkingAiLine(recent[i]!);
 	}
 }
-let toolsOn = true;
-let filesOn = false;
-/** Which side of the terminal the dock column sits on ("left" | "right"). */
-let dockSide: DockSide = "right";
 /** Files panel edit-diff subpanel (session-local; /split-diff, persisted by
  * /split-save). Off keeps the file list but drops the bottom diff section. */
 let showDiff = true;
@@ -356,52 +335,12 @@ let toolsScroll: ScrollView | null = null;
 let thinkingBody: { invalidate(): void } | null = null;
 /** Panel C: response-only view instead of pi's transcript (persisted). */
 let trimResponse = false;
-/** Top band height in rows (6–40, persisted; /split-height). */
-let bandHeight = 14;
-/** F: tools panel's share of the band width in percent (20–60, default 35,
- * persisted as toolsWidthPct; session-local, only /split-save writes it). */
-let toolsWidthPct = 35;
-/** Files dock width in cols set by dragging its edge (null = auto 25%,
- * 34–48). Session-local; persisted by /split-save as filesWidth. */
-let filesWidth: number | null = null;
-/** Named layout slot assignments (topLeft, topRight, main, dock). */
-let layoutSlots: LayoutSlots = {
-	topLeft: null,
-	topRight: null,
-	main: "messages",
-	dock: null,
-};
 /** Panel expanded to the whole area above the editor (header ↗ button).
  * Transient: never persisted. */
 // PanelId is imported from ./layout-types.ts.
 let zoomed: PanelId | null = null;
 
-const SLOT_NAMES: readonly SlotName[] = ["topLeft", "topRight", "main", "dock"];
-
-function slotOf(panel: Exclude<SlotPanel, null>): SlotName | null {
-	for (const s of SLOT_NAMES) {
-		if (layoutSlots[s] === panel) return s;
-	}
-	return null;
-}
-
-function syncFlagsFromSlots(): void {
-	thinkingOn = slotOf("thinking") !== null;
-	toolsOn = slotOf("tools") !== null;
-	filesOn = slotOf("files") !== null;
-}
-
-function hasNonBareSlots(): boolean {
-	return (
-		layoutSlots.topLeft !== null ||
-		layoutSlots.topRight !== null ||
-		layoutSlots.main !== "messages" ||
-		layoutSlots.dock !== null
-	);
-}
-
-const bandToolsColsFor = (total: number) => bandToolsColsForPct(total, toolsWidthPct);
-const dockColsFor = (cols: number) => dockColsForManual(cols, filesWidth);
+const dockColsFor = (cols: number) => dockColsForManual(cols, null);
 
 /** SV-08: fingerprint of the live theme's panel-relevant colors, captured
  * when the composition was built. pi replaces the global theme object on a
@@ -925,7 +864,7 @@ function ensureToolTicker(): void {
 			if (e.active && e.startedAt !== undefined) running = true;
 		if (!running) return stopToolTicker();
 		toolsVersionCounter++;
-		if (toolsOn) requestRender();
+		if (anyPanelActive()) requestRender();
 	}, 1000);
 	toolTicker.unref?.();
 }
@@ -1298,22 +1237,11 @@ function requestRender(): void {
 
 const anyPanelActive = () =>
 	isLayoutLayerActive("ui") || isLayoutLayerActive("files") || !!REG.active;
-// SV-01 (revised): /split is a full toggle pair over every panel flag
-// (thinking/tools/files/trim), so its "on" state is the flag disjunction.
-// The old bandActive() derived state from the band alone, which made a
-// files-only or trim-only layout report "off" for a not-bare view and left
-// those panels running after a /split off. Layout-layer checks remain in use
-// only for layout ownership (anyPanelActive/filesActive).
-const panelsActive = () =>
-	layoutMode === "drawers"
-		? drawersStrategy.wantsLayer()
-		: hasNonBareSlots() || trimResponse;
+/** /split state: the drawers layer is wanted. */
+const panelsActive = () => drawersStrategy.wantsLayer();
 const filesActive = () => isLayoutLayerActive("files") || !!REG.active;
 
 // ─── mouse: drag-resize, header buttons, wheel routing ───────────────────────
-
-/** Active layout mode and strategy registry. */
-let layoutMode: LayoutMode = "grid";
 
 /** Terminal dimensions the current geometry was computed for (resize hook). */
 let composedTermCols = -1;
@@ -1323,38 +1251,6 @@ let composedTermRows = -1;
 let themeGetter: (() => Theme) | null = null;
 let notifyFn: ((msg: string, level: "info" | "warning") => void) | null = null;
 
-/** Grid strategy instance; owns grid geo, drag state, and band/dock composition. */
-const gridStrategy = new GridLayoutStrategy({
-	getSlots: () => layoutSlots,
-	getDockSide: () => dockSide,
-	getBandHeight: () => bandHeight,
-	setBandHeight: (h) => {
-		bandHeight = h;
-	},
-	getToolsWidthPct: () => toolsWidthPct,
-	setToolsWidthPct: (pct) => {
-		toolsWidthPct = pct;
-	},
-	getFilesWidth: () => filesWidth,
-	setFilesWidth: (w) => {
-		filesWidth = w;
-	},
-	getFlags: () => ({ thinkingOn, toolsOn, filesOn, trimResponse }),
-	getTerminalSize: () => ({
-		cols: tuiRef?.terminal?.columns ?? 120,
-		rows: tuiRef?.terminal?.rows ?? 40,
-	}),
-	dockColsFor: (cols) => dockColsFor(cols),
-	dockColsForManual: (cols, wanted) => dockColsForManual(cols, wanted),
-	bandToolsColsFor: (bandCols) => bandToolsColsFor(bandCols),
-	requestRender: () => requestRender(),
-	onUseBaseTranscript: () => {
-		const base = getBaseRoot();
-		const baseTranscript = base ? baseTranscriptOf(base) : null;
-		if (baseTranscript instanceof ScrollView) messagesScrollRef = baseTranscript;
-	},
-});
-
 const drawersStrategy = new DrawersLayoutStrategy(
 	() => ({
 		cols: tuiRef?.terminal?.columns ?? 120,
@@ -1363,18 +1259,8 @@ const drawersStrategy = new DrawersLayoutStrategy(
 	() => requestRender(),
 );
 
-const strategies: Record<LayoutMode, LayoutStrategy> = {
-	grid: gridStrategy,
-	drawers: drawersStrategy,
-};
-
 function activeStrategy(): LayoutStrategy {
-	return strategies[layoutMode] ?? gridStrategy;
-}
-
-/** Band width available next to a visible dock (used by FilesPanel main-slot sizing). */
-function bandBase(cols: number): number {
-	return gridStrategy.bandBase(cols);
+	return drawersStrategy;
 }
 
 /** Re-apply layout geometry in place on resize or state mutation. */
@@ -1572,33 +1458,15 @@ function toggleToolsLive(): void {
 	notifyFn?.(`Tool panel: live output of ${toolsBy.get(id)?.name ?? "tool"}`, "info");
 }
 
-const PANEL_LABELS: Record<PanelId, [string, string]> = {
-	thinking: ["Thinking", "/split-thinking"],
-	tools: ["Tools", "/split-tools"],
-	files: ["Files", "/files"],
-	messages: ["Messages", "/split-slot"],
-};
-
-function hidePanel(id: PanelId): void {
-	const s = slotOf(id);
-	if (s) layoutSlots[s] = null;
-	if (
-		layoutSlots.topLeft === null &&
-		layoutSlots.topRight === null &&
-		layoutSlots.main === null &&
-		layoutSlots.dock === null
-	) {
-		layoutSlots.main = "messages";
-	}
-	syncFlagsFromSlots();
-	if (zoomed === id) zoomed = null;
+/** Zoomed-panel header [×]: leave the zoom. */
+function closeZoom(id: PanelId): void {
+	if (zoomed !== id) return;
+	zoomed = null;
 	recompose();
-	const [label, cmd] = PANEL_LABELS[id];
-	notifyFn?.(`${label} hidden · ${cmd} to show`, "info");
 }
 
-/** Shared mouse handling for panel chrome: header buttons (top), band-height
- * drag (band bottom border), width drag (left edge), wheel routing. */
+/** Shared mouse handling for panel chrome: header buttons (top), bottom-frame
+ * pager and live buttons, drawer drag continuation, wheel routing. */
 function panelMouse(
 	ev: TuiMouseEvent,
 	ctl: PanelCtl | undefined,
@@ -1611,10 +1479,6 @@ function panelMouse(
 	if (!ctl) return undefined;
 	if (ev.type === "wheel") {
 		ctl.scroll?.scrollBy(ev.wheelDelta ?? 0);
-		if (ctl.id === "messages") {
-			suppressNextPinClear = false;
-			syncVisibleTurnsFromMessages(true);
-		}
 		return { handled: true };
 	}
 	if (ev.button !== "left") return undefined;
@@ -1622,20 +1486,12 @@ function panelMouse(
 		if (where === "top" && buttonAt(ev)) return { capture: true };
 		if (where === "bottom" && (liveButtonAt(ev, ctl.id) || pagerHitTest(ev, ctl.id)))
 			return { capture: true };
-		if (ev.x === 0) {
-			const edgeRes = ctl.onEdgePress?.("left", ev);
-			if (edgeRes) return edgeRes;
-		}
-		if (where === "bottom") {
-			const edgeRes = ctl.onEdgePress?.("bottom", ev);
-			if (edgeRes) return edgeRes;
-		}
 		return undefined;
 	}
 	if (ev.type === "click" && where === "top") {
 		const b = buttonAt(ev);
 		if (b === "zoom") toggleZoom(ctl.id);
-		else if (b === "close") hidePanel(ctl.id);
+		else if (b === "close") closeZoom(ctl.id);
 		if (b) return { handled: true };
 	}
 	if (ev.type === "click" && where === "bottom") {
@@ -3212,37 +3068,22 @@ function bandDef(theme: Theme, id: "thinking" | "tools"): BandDef {
  * engine's discarded measurement passes O(1).
  */
 function framedPanel(theme: Theme, d: BandDef, ctl: PanelCtl): Component {
-	// Filler rows track the real viewport (band, drawer, or zoomed), so the left
-	// edge stays continuous at any allocated height.
-	const minRows = () =>
-		ctl.scroll?.viewportHeight ||
-		(ctl.minRows
-			? ctl.minRows()
-			: Math.max(1, (tuiRef?.terminal?.rows ?? 24) - bandHeight - 2));
+	// Filler rows track the real viewport, so the left edge stays continuous
+	// at any allocated height.
+	const minRows = () => ctl.scroll?.viewportHeight || ctl.minRows?.() || 1;
 	const body: Component =
 		ctl.id === "tools"
 			? new RichToolsBody(theme, d.version, d.empty, minRows, ctl)
-			: ctl.id === "thinking"
-				? new ThinkingBody(
-						theme,
-						d.style,
-						d.lines,
-						d.version,
-						d.empty,
-						minRows,
-						ctl,
-						d.windowed ?? true,
-					)
-				: new RecentBody(
-						theme,
-						d.style,
-						d.lines,
-						d.version,
-						d.empty,
-						minRows,
-						ctl,
-						d.windowed ?? true,
-					);
+			: new ThinkingBody(
+					theme,
+					d.style,
+					d.lines,
+					d.version,
+					d.empty,
+					minRows,
+					ctl,
+					d.windowed ?? true,
+				);
 	const scroll = new ScrollView(body, {
 		follow: "end",
 		overscroll: "contain",
@@ -3263,57 +3104,19 @@ function framedPanel(theme: Theme, d: BandDef, ctl: PanelCtl): Component {
 	]);
 }
 
-function buildSlotPanel(
-	theme: Theme,
-	id: Exclude<SlotPanel, null>,
-	slot: SlotName,
-	base: Component | null,
-	ctl: PanelCtl,
-): Component {
-	if (id === "thinking" || id === "tools") {
-		return framedPanel(theme, bandDef(theme, id), ctl);
-	}
-	if (id === "files") {
-		const heightProviderForSlot = (): number => {
-			if (slot === "topLeft" || slot === "topRight") return bandHeight;
-			const rows = tuiRef?.terminal?.rows ?? 24;
-			if (slot === "dock") return rows;
-			// slot === "main": terminal rows minus band (if visible & fits) and editor dock.
-			const cols = tuiRef?.terminal?.columns ?? 80;
-			const editorDock = base ? baseDockOf(base) : null;
-			const dockH = editorDock ? editorDock.render(bandBase(cols)).length : 0;
-			const hasBand =
-				(layoutSlots.topLeft !== null || layoutSlots.topRight !== null) &&
-				rows - bandHeight - 1 >= MIN_ROWS_BELOW_BAND;
-			const bandH = hasBand ? bandHeight + 1 : 0;
-			return Math.max(8, rows - bandH - dockH);
-		};
-		return new FilesPanel(theme, heightProviderForSlot, ctl);
-	}
-	// id === "messages"
+/** The Messages region: the response-only ScrollView when trimResponse is on,
+ * else pi's own transcript ScrollView. */
+function buildMessages(theme: Theme, base: Component | null): Component {
 	const msgScroll =
 		trimResponse && base
 			? ensureResponseScrollView(theme, base)
 			: (base ? baseTranscriptOf(base) : null) ??
 				(base ? ensureResponseScrollView(theme, base) : new Spacer(1));
 	if (msgScroll instanceof ScrollView) messagesScrollRef = msgScroll;
-	if (slot === "main") {
-		return msgScroll;
-	}
-	if (msgScroll instanceof ScrollView) ctl.scroll = msgScroll;
-	return new MeasurementSafeVStack([
-		{
-			component: new BorderTop(theme, "Messages", "accent", () => false, ctl),
-			basis: 1,
-			grow: 0,
-			shrink: 0,
-		},
-		{ component: msgScroll, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-		{ component: new BorderBottom(theme, ctl), basis: 1, grow: 0, shrink: 0 },
-	]);
+	return msgScroll;
 }
 
-/** Whether a zoomable panel is currently visible in the active layout strategy. */
+/** Whether a panel is zoomable: the drawers view is on. */
 function panelOn(id: PanelId): boolean {
 	return activeStrategy().panelVisible(
 		id,
@@ -3322,28 +3125,23 @@ function panelOn(id: PanelId): boolean {
 }
 
 /** D1: one panel over the whole area above pi's editor dock (reused verbatim,
- * like trim mode); the other slots are hidden until the zoom is restored. */
+ * like trim mode); the rest of the layout is hidden until the zoom is restored. */
 function buildZoom(theme: Theme, id: PanelId): Component | null {
 	const base = getBaseRoot();
 	const dock = base ? baseDockOf(base) : null;
 	if (!dock) return null;
-	const ctl: PanelCtl = { id };
-	const panel =
-		id === "files"
-			? new FilesPanel(
-					theme,
-					// The panel sizes itself: terminal rows minus the dock's height.
-					() =>
-						Math.max(
-							8,
-							(tuiRef?.terminal?.rows ?? 24) -
-								dock.render(tuiRef?.terminal?.columns ?? 80).length,
-						),
-					ctl,
-				)
-			: id === "messages"
-				? buildSlotPanel(theme, "messages", "dock", base, ctl)
-				: framedPanel(theme, bandDef(theme, id), ctl);
+	const ctl: PanelCtl = {
+		id,
+		// First-frame estimate: terminal rows minus the dock and the two frame rows.
+		minRows: () =>
+			Math.max(
+				1,
+				(tuiRef?.terminal?.rows ?? 24) -
+					dock.render(tuiRef?.terminal?.columns ?? 80).length -
+					2,
+			),
+	};
+	const panel = framedPanel(theme, bandDef(theme, id), ctl);
 	return new VStack([
 		{ component: panel, basis: 0, grow: 1, shrink: 1, minSize: 1 },
 		{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
@@ -3570,11 +3368,7 @@ function buildBodyScrollPair(
 	ctl: PanelCtl,
 ): { scroll: ScrollView; bottom: Component; reattach: () => void } {
 	const d = bandDef(theme, id);
-	const minRows = () =>
-		ctl.scroll?.viewportHeight ||
-		(ctl.minRows
-			? ctl.minRows()
-			: Math.max(1, (tuiRef?.terminal?.rows ?? 24) - bandHeight - 2));
+	const minRows = () => ctl.scroll?.viewportHeight || ctl.minRows?.() || 1;
 	const body: Component =
 		id === "tools"
 			? new RichToolsBody(theme, d.version, d.empty, minRows, ctl)
@@ -3708,7 +3502,7 @@ function composeLayout(theme: Theme, inner: Component): Component {
 		trimResponse,
 		cols,
 		rows,
-		buildSlotPanel: (id, slot, ctl) => buildSlotPanel(theme, id, slot, base, ctl),
+		buildMessages: () => buildMessages(theme, base),
 		buildBodyScroll: (id, ctl) => buildBodyScrollPair(theme, id, ctl),
 		panelSummary: (id) => summarizeDrawerPanel(id),
 		toggleZoom: (id) => toggleZoom(id),
@@ -3810,9 +3604,9 @@ export default function (pi: ExtensionAPI) {
 								reconcileLayout(liveTheme);
 							}
 						}
-						// SV-07/F2: dock width and the band's width split derive from the
-						// terminal width; on any resize re-apply them to the composed
-						// entries in place (no rebuild, scroll positions survive).
+						// SV-07/F2: drawer heights derive from the terminal size; on any
+						// resize re-apply them to the composed entries in place (no
+						// rebuild, scroll positions survive).
 						if (
 							typeof tuiRef?.setLayoutRoot === "function" &&
 							isLayoutLayerActive("ui") &&
@@ -3950,28 +3744,10 @@ export default function (pi: ExtensionAPI) {
 			toolsVersionCounter++;
 			requestRender();
 		});
-		let cfg = normalizeConfig(loadUiPanelsConfig());
-		if (pi.getFlag("no-split")) {
-			// --no-split: start bare, ignoring the saved ui-panels.json defaults.
-			cfg = {
-				...cfg,
-				split: false,
-				thinking: false,
-				tools: false,
-				files: false,
-				trimResponse: false,
-				slots: {
-					topLeft: null,
-					topRight: null,
-					main: "messages",
-					dock: null,
-				},
-			};
-		}
-		layoutSlots = { ...cfg.slots };
-		syncFlagsFromSlots();
-		layoutMode = pi.getFlag("no-split") ? "grid" : cfg.layoutMode;
-		drawersStrategy.setEnabled(layoutMode === "drawers");
+		const cfg = normalizeConfig(loadUiPanelsConfig());
+		// --no-split: start bare, ignoring the saved ui-panels.json layout.
+		const noSplit = Boolean(pi.getFlag("no-split"));
+		drawersStrategy.setEnabled(!noSplit);
 		if (cfg.layouts.drawers) {
 			drawersStrategy.hydrate(cfg.layouts.drawers);
 		}
@@ -3981,14 +3757,10 @@ export default function (pi: ExtensionAPI) {
 		toolMode = cfg.toolMode;
 		toolsScope = cfg.toolsScope;
 		toolExpandGlobal = null;
-		bandHeight = cfg.bandHeight;
-		toolsWidthPct = cfg.toolsWidthPct;
-		filesWidth = cfg.filesWidth;
-		dockSide = cfg.dockSide;
 		zoomed = null;
 		showDiff = cfg.diff;
 		answerDividerMode = cfg.answerDivider;
-		trimResponse = cfg.trimResponse;
+		trimResponse = noSplit ? false : cfg.trimResponse;
 		responseSource = cfg.responseSource;
 		// SV-14: arm the startup composition BEFORE reconstruct — the widget
 		// factory runs synchronously inside it and is the first point where the
@@ -4012,11 +3784,8 @@ export default function (pi: ExtensionAPI) {
 							startupPending = false;
 							reconcileLayout(ctx.ui.theme);
 						}
-						if (cfg.split) ctx.ui.notify("Split view on", "info");
-					} else if (cfg.files) {
-						// Regular mode uses an overlay; filesOn is already the saved
-						// state, so clear it before calling the toggle.
-						filesOn = false;
+					} else if (cfg.files && !noSplit) {
+						// Regular mode shows the files panel as an overlay.
 						toggleFilesPanel(ctx);
 					}
 				} catch {
@@ -4262,52 +4031,11 @@ export default function (pi: ExtensionAPI) {
 
 	// ── panel toggles ──
 
-	/** Toggle the files panel (dock in fullscreen, overlay in regular). */
+	/** Toggle the files panel overlay. */
 	const toggleFilesPanel = (ctx: ExtensionContext): boolean => {
 		if (ctx.mode !== "tui") {
 			ctx.ui.notify("/files requires interactive mode", "error");
 			return filesActive();
-		}
-		// Fullscreen grid mode: use the composed dock layer.
-		// In drawers mode, fall through to the non-capturing right overlay so
-		// single-column Messages stays intact.
-		if (
-			layoutMode === "grid" &&
-			tuiRef &&
-			typeof tuiRef.setLayoutRoot === "function"
-		) {
-			const existingSlot = slotOf("files");
-			if (existingSlot !== null) {
-				layoutSlots[existingSlot] = null;
-				if (
-					layoutSlots.topLeft === null &&
-					layoutSlots.topRight === null &&
-					layoutSlots.main === null &&
-					layoutSlots.dock === null
-				) {
-					layoutSlots.main = "messages";
-				}
-				syncFlagsFromSlots();
-				reconcileLayout(ctx.ui.theme);
-				ctx.ui.notify("Files panel closed", "info");
-				return false;
-			}
-			layoutSlots = assignSlot(layoutSlots, "dock", "files");
-			syncFlagsFromSlots();
-			reconcileLayout(ctx.ui.theme);
-			// SV-24: be truthful when the dock is composed but gated invisible
-			// — the entry's visible callback hides it below MIN_TERM_WIDTH, so
-			// "docked right" alone would overstate what the user sees.
-			const dockCols = tuiRef?.terminal?.columns ?? 0;
-			if (dockCols > 0 && dockCols < MIN_TERM_WIDTH) {
-				ctx.ui.notify(
-					`Files panel on — hidden below ${MIN_TERM_WIDTH} cols (now ${dockCols})`,
-					"warning",
-				);
-			} else {
-				ctx.ui.notify("Files panel docked right", "info");
-			}
-			return true;
 		}
 		// Regular mode: passive TUI overlay (Option C — decisions/D-overlay-lifecycle.md).
 		// No ctx.ui.custom() promise is created, so nothing can be stranded; the
@@ -4369,116 +4097,35 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("/split requires fullscreen mode", "warning");
 				return;
 			}
-			// Full toggle pair (revised SV-01): OFF clears every panel flag so
-			// pi's native layout is fully restored (no band, no files dock, no
-			// trim/response-only swap). ON restores the panel flags saved as
-			// startup defaults (ui-panels.json, written by /split-save); if the
-			// saved layout has no panels on (or was never saved), fall back to
-			// the classic default of thinking + tools. Geometry (bandHeight,
-			// toolMode, toolsWidthPct) is session-local and not reset here.
+			// OFF restores pi's native layout (no drawers, no response-only
+			// swap). ON brings the drawers back with the drawer state saved as
+			// startup defaults (ui-panels.json, written by /split-save).
 			const wasOn = panelsActive();
 			if (wasOn) {
-				if (layoutMode === "drawers") {
-					drawersStrategy.setEnabled(false);
-				} else {
-					layoutSlots = {
-						topLeft: null,
-						topRight: null,
-						main: "messages",
-						dock: null,
-					};
-					syncFlagsFromSlots();
-				}
+				drawersStrategy.setEnabled(false);
 				trimResponse = false;
 				zoomed = null;
 				reconcileLayout(ctx.ui.theme);
 				ctx.ui.notify("Split view off (all panels) · /split-save saves defaults", "info");
 			} else {
 				const cfg = normalizeConfig(loadUiPanelsConfig());
-				if (layoutMode === "drawers" || cfg.layoutMode === "drawers") {
-					layoutMode = "drawers";
-					drawersStrategy.setEnabled(true);
-					if (cfg.layouts.drawers) drawersStrategy.hydrate(cfg.layouts.drawers);
-					const base = getBaseRoot();
-					if (base && baseDockOf(base)) trimResponse = true;
-				} else {
-					const savedBare =
-						cfg.slots.topLeft === null &&
-						cfg.slots.topRight === null &&
-						cfg.slots.main === "messages" &&
-						cfg.slots.dock === null &&
-						!cfg.trimResponse;
-					if (savedBare) {
-						layoutSlots = {
-							topLeft: "thinking",
-							topRight: "tools",
-							main: "messages",
-							dock: null,
-						};
-					} else {
-						layoutSlots = { ...cfg.slots };
-						showDiff = cfg.diff;
-						answerDividerMode = cfg.answerDivider;
-						trimResponse = cfg.trimResponse;
-						responseSource = cfg.responseSource;
-					}
-					syncFlagsFromSlots();
-				}
+				drawersStrategy.setEnabled(true);
+				if (cfg.layouts.drawers) drawersStrategy.hydrate(cfg.layouts.drawers);
+				const base = getBaseRoot();
+				if (base && baseDockOf(base)) trimResponse = true;
 				reconcileLayout(ctx.ui.theme);
 				ctx.ui.notify("Split view on (saved layout) · /split-save saves defaults", "info");
 			}
 		},
 	});
 
-	/** Toggle a band panel (thinking/tools) in/out of layoutSlots while keeping
-	 * flags in sync. */
-	const toggleBandPanel = (
-		panel: "thinking" | "tools",
-		preferredSlot: "topLeft" | "topRight",
-	): boolean => {
-		const existing = slotOf(panel);
-		if (existing !== null) {
-			layoutSlots[existing] = null;
-			if (
-				layoutSlots.topLeft === null &&
-				layoutSlots.topRight === null &&
-				layoutSlots.main === null &&
-				layoutSlots.dock === null
-			) {
-				layoutSlots.main = "messages";
-			}
-			syncFlagsFromSlots();
-			return false;
-		}
-		const fallbackSlot = preferredSlot === "topLeft" ? "topRight" : "topLeft";
-		const target =
-			layoutSlots[preferredSlot] === null
-				? preferredSlot
-				: layoutSlots[fallbackSlot] === null
-					? fallbackSlot
-					: preferredSlot;
-		layoutSlots = assignSlot(layoutSlots, target, panel);
-		syncFlagsFromSlots();
-		return true;
-	};
-
 	pi.registerCommand("split-thinking", {
-		description: "Toggle the thinking panel (or Thinking drawer in drawers mode)",
+		description: "Toggle the Thinking drawer open/closed",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") return;
-			if (layoutMode === "drawers") {
-				drawersStrategy.toggleDrawer("thinking");
-				const st = drawersStrategy.getDrawerState("thinking");
-				ctx.ui.notify(`Thinking drawer ${st.open ? "expanded" : "collapsed"}`, "info");
-				return;
-			}
-			const on = toggleBandPanel("thinking", "topLeft");
-			reconcileLayout(ctx.ui.theme);
-			if (layoutSlots.topLeft !== null || layoutSlots.topRight !== null) {
-				ctx.ui.notify(`Thinking ${on ? "on" : "off"}`, "info");
-			} else {
-				ctx.ui.notify("Band off (no panels)", "info");
-			}
+			drawersStrategy.toggleDrawer("thinking");
+			const st = drawersStrategy.getDrawerState("thinking");
+			ctx.ui.notify(`Thinking drawer ${st.open ? "expanded" : "collapsed"}`, "info");
 		},
 	});
 
@@ -4542,18 +4189,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("split-tools", {
-		description: "Toggle the tools panel (or Tool Usage drawer in drawers mode)",
+		description: "Toggle the Tool Usage drawer open/closed",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") return;
-			if (layoutMode === "drawers") {
-				drawersStrategy.toggleDrawer("tools");
-				const st = drawersStrategy.getDrawerState("tools");
-				ctx.ui.notify(`Tools drawer ${st.open ? "expanded" : "collapsed"}`, "info");
-				return;
-			}
-			const on = toggleBandPanel("tools", "topRight");
-			reconcileLayout(ctx.ui.theme);
-			ctx.ui.notify(`Tools ${on ? "on" : "off"}`, "info");
+			drawersStrategy.toggleDrawer("tools");
+			const st = drawersStrategy.getDrawerState("tools");
+			ctx.ui.notify(`Tools drawer ${st.open ? "expanded" : "collapsed"}`, "info");
 		},
 	});
 
@@ -4567,10 +4208,6 @@ export default function (pi: ExtensionAPI) {
 				.split(/\s+/)
 				.filter(Boolean);
 			const arg = parts[0] ?? "";
-			if (layoutMode !== "drawers") {
-				ctx.ui.notify("Switch to drawers mode first: /split-preset drawers", "info");
-				return;
-			}
 			if (arg === "thinking" || arg === "tools") {
 				drawersStrategy.toggleDrawer(arg);
 				const st = drawersStrategy.getDrawerState(arg);
@@ -4695,216 +4332,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("split-height", {
-		description: "Set the top band height in rows (6-40)",
-		handler: async (args, ctx) => {
-			const n = Number.parseInt(String(args ?? "").trim(), 10);
-			if (Number.isNaN(n)) {
-				ctx.ui.notify(
-					`Band height: ${bandHeight} rows (usage: /split-height 6-40)`,
-					"info",
-				);
-				return;
-			}
-			bandHeight = Math.max(6, Math.min(40, n));
-			reconcileLayout(ctx.ui.theme);
-			ctx.ui.notify(`Band height: ${bandHeight} rows`, "info");
-		},
-	});
-
-	pi.registerCommand("split-tools-width", {
-		description: "Set right band panel width as % of the band (20-80, default 35)",
-		handler: async (args, ctx) => {
-			const arg = String(args ?? "").trim();
-			if (!arg) {
-				ctx.ui.notify(
-					`Right band panel width: ${toolsWidthPct}% of the band (usage: /split-tools-width 20-80)`,
-					"info",
-				);
-				return;
-			}
-			const n = Number.parseInt(arg, 10);
-			if (Number.isNaN(n)) {
-				ctx.ui.notify(
-					"Invalid percentage (usage: /split-tools-width 20-80)",
-					"error",
-				);
-				return;
-			}
-			toolsWidthPct = Math.max(20, Math.min(80, n));
-			reconcileLayout(ctx.ui.theme);
-			ctx.ui.notify(`Right band panel width: ${toolsWidthPct}%`, "info");
-		},
-	});
-
-	const PRESET_OPTIONS: { name: PresetName; label: string }[] = [
-		{
-			name: "drawers",
-			label: "drawers — Full-width Messages · prompt · collapsible Thinking & Tools drawers below prompt",
-		},
-		{
-			name: "chat-left",
-			label: "chat-left — Messages + prompt left · Thinking + Tools right",
-		},
-		{
-			name: "workbench",
-			label: "workbench — Tools main · Thinking | Messages top · Files dock",
-		},
-		{
-			name: "sidebar-chat",
-			label: "sidebar-chat — Tools main · Thinking top · Messages dock right",
-		},
-		{
-			name: "classic",
-			label: "classic — Messages main · Thinking | Tools top · Files dock",
-		},
-		{
-			name: "deep-think",
-			label: "deep-think — Thinking main · Messages | Tools top · Files dock",
-		},
-		{
-			name: "focused-tools",
-			label: "focused-tools — Tools main · Messages top · no dock",
-		},
-	];
-
-	pi.registerCommand("split-preset", {
-		description:
-			"Apply a layout preset (drawers | chat-left | workbench | sidebar-chat | classic | deep-think | focused-tools)",
-		handler: async (args, ctx) => {
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify("/split-preset requires interactive mode", "error");
-				return;
-			}
-			if (!tuiRef || typeof tuiRef.setLayoutRoot !== "function") {
-				ctx.ui.notify("/split-preset requires fullscreen mode", "warning");
-				return;
-			}
-			let chosen: PresetName | undefined;
-			const arg = String(args ?? "").trim().toLowerCase();
-			if (!arg) {
-				const labels = PRESET_OPTIONS.map((p) => p.label);
-				const pick = await ctx.ui.select("Choose a split-view layout preset", labels);
-				if (pick === undefined) return;
-				const idx = labels.indexOf(pick);
-				chosen = idx >= 0 ? PRESET_OPTIONS[idx]?.name : undefined;
-			} else if (Object.hasOwn(LAYOUT_PRESETS, arg)) {
-				chosen = arg as PresetName;
-			} else {
-				ctx.ui.notify(
-					`Unknown preset "${arg}". Available: ${PRESET_OPTIONS.map((p) => p.name).join(", ")}`,
-					"error",
-				);
-				return;
-			}
-			if (!chosen) return;
-			const preset = LAYOUT_PRESETS[chosen];
-			const nextMode: LayoutMode = preset.layoutMode ?? "grid";
-			layoutMode = nextMode;
-			drawersStrategy.setEnabled(nextMode === "drawers");
-			if (nextMode === "drawers" && preset.layoutState) {
-				drawersStrategy.hydrate(preset.layoutState);
-			}
-			layoutSlots = { ...preset.slots };
-			bandHeight = preset.bandHeight;
-			toolsWidthPct = preset.toolsWidthPct;
-			filesWidth = preset.filesWidth;
-			dockSide = preset.dockSide ?? "right";
-			zoomed = null;
-			syncFlagsFromSlots();
-			const base = getBaseRoot();
-			if (
-				(nextMode === "drawers" ||
-					(slotOf("messages") !== null &&
-						slotOf("messages") !== "main" &&
-						slotOf("tools") !== null)) &&
-				base &&
-				baseDockOf(base)
-			) {
-				trimResponse = true;
-			}
-			reconcileLayout(ctx.ui.theme);
-			ctx.ui.notify(`Layout preset: ${chosen}`, "info");
-		},
-	});
-
-	pi.registerCommand("split-slot", {
-		description:
-			"Assign a panel to a slot: /split-slot <topLeft|topRight|main|dock> <thinking|tools|messages|files|none>",
-		handler: async (args, ctx) => {
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify("/split-slot requires interactive mode", "error");
-				return;
-			}
-			if (layoutMode !== "grid") {
-				ctx.ui.notify(
-					"/split-slot applies to grid layouts (switch with /split-preset chat-left)",
-					"info",
-				);
-				return;
-			}
-			if (!tuiRef || typeof tuiRef.setLayoutRoot !== "function") {
-				ctx.ui.notify("/split-slot requires fullscreen mode", "warning");
-				return;
-			}
-			const parts = String(args ?? "")
-				.trim()
-				.split(/\s+/)
-				.filter(Boolean);
-			if (parts.length !== 2) {
-				ctx.ui.notify(
-					"Usage: /split-slot <topLeft|topRight|main|dock> <thinking|tools|messages|files|none>",
-					"info",
-				);
-				return;
-			}
-			const slotMap: Record<string, SlotName> = {
-				topleft: "topLeft",
-				topright: "topRight",
-				main: "main",
-				dock: "dock",
-			};
-			const slot = slotMap[parts[0]!.toLowerCase()];
-			if (!slot) {
-				ctx.ui.notify(
-					`Invalid slot "${parts[0]}". Use: topLeft, topRight, main, dock`,
-					"error",
-				);
-				return;
-			}
-			const panelRaw = parts[1]!.toLowerCase();
-			let panel: SlotPanel;
-			if (panelRaw === "none" || panelRaw === "null") {
-				panel = null;
-			} else if (
-				panelRaw === "thinking" ||
-				panelRaw === "tools" ||
-				panelRaw === "messages" ||
-				panelRaw === "files"
-			) {
-				panel = panelRaw;
-			} else {
-				ctx.ui.notify(
-					`Invalid panel "${parts[1]}". Use: thinking, tools, messages, files, none`,
-					"error",
-				);
-				return;
-			}
-			layoutSlots = assignSlot(layoutSlots, slot, panel);
-			if (
-				layoutSlots.topLeft === null &&
-				layoutSlots.topRight === null &&
-				layoutSlots.main === null &&
-				layoutSlots.dock === null
-			) {
-				layoutSlots.main = "messages";
-			}
-			syncFlagsFromSlots();
-			reconcileLayout(ctx.ui.theme);
-			ctx.ui.notify(`Slot ${slot}: ${panel ?? "none"}`, "info");
-		},
-	});
-
 	pi.registerCommand("split-divider", {
 		description:
 			"Response-only divider between successive answers: rule | space",
@@ -4974,25 +4401,6 @@ export default function (pi: ExtensionAPI) {
 				`Panel C: ${trimResponse ? "response only" : "full transcript"}`,
 				"info",
 			);
-		},
-	});
-
-	pi.registerCommand("split-dock-side", {
-		description: "Move the dock column to the left or right (left | right)",
-		handler: async (args, ctx) => {
-			if (ctx.mode !== "tui") return;
-			if (layoutMode !== "grid") {
-				ctx.ui.notify(
-					"/split-dock-side applies to grid layouts (switch with /split-preset chat-left)",
-					"info",
-				);
-				return;
-			}
-			const arg = String(args ?? "").trim().toLowerCase();
-			if (arg === "left" || arg === "right") dockSide = arg;
-			else dockSide = dockSide === "left" ? "right" : "left";
-			reconcileLayout(ctx.ui.theme);
-			ctx.ui.notify(`Dock side: ${dockSide}`, "info");
 		},
 	});
 
@@ -5074,21 +4482,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("split-save", {
 		description: "Save current panel layout as the startup defaults",
 		handler: async (_args, ctx) => {
-			// SV-11: serialize the EFFECTIVE files state — a regular-mode files
-			// overlay of the CURRENT generation counts as files-on; an overlay left
-			// over from a stale generation must not save a phantom panel.
-			const filesEffective =
-				filesOn || (REG.active !== null && REG.activeGen === MY_GEN);
+			// SV-11: a regular-mode files overlay of the CURRENT generation counts
+			// as files-on; an overlay left over from a stale generation must not
+			// save a phantom panel.
+			const filesEffective = REG.active != null && REG.activeGen === MY_GEN;
 			// SV-13: report the real outcome — success only after a durable write.
 			const saved = saveUiPanelsConfig({
-				split:
-					layoutSlots.topLeft !== null ||
-					layoutSlots.topRight !== null ||
-					layoutSlots.main !== "messages",
-				thinking: thinkingOn,
-				tools: toolsOn,
 				files: filesEffective,
-				slots: { ...layoutSlots },
 				toolMode,
 				toolsScope,
 				trimResponse,
@@ -5096,11 +4496,6 @@ export default function (pi: ExtensionAPI) {
 				thinkingMode,
 				thinkingHud: thinkingHudMode !== "off",
 				thinkingHudMode,
-				bandHeight,
-				toolsWidthPct,
-				...(filesWidth === null ? {} : { filesWidth }),
-				dockSide,
-				layoutMode,
 				layouts: {
 					drawers: drawersStrategy.serialize(),
 				},

@@ -6,13 +6,12 @@ import {
 	type TuiMouseEventResult,
 	VStack,
 } from "@earendil-works/pi-tui";
-import type { DockSide, LayoutSlots, SlotName, SlotPanel } from "./ui-panels-config.ts";
 
 /** Built-in layout strategy identifiers. */
-export type LayoutMode = "grid" | "drawers";
+export type LayoutMode = "drawers";
 
-/** Panel identifiers supported by layout strategies. */
-export type PanelId = "thinking" | "tools" | "files" | "messages";
+/** Framed panel identifiers (the two drawers, also zoomable). */
+export type PanelId = "thinking" | "tools";
 
 /**
  * Neutral mouse & sizing wiring of one panel.
@@ -25,11 +24,6 @@ export interface PanelCtl {
 	scroll?: ScrollView;
 	/** Optional initial minRows estimate before viewportHeight is known. */
 	minRows?: () => number;
-	/** Edge-drag start hook owned by the active LayoutStrategy. */
-	onEdgePress?: (
-		edge: "left" | "bottom" | "top",
-		ev: TuiMouseEvent,
-	) => TuiMouseEventResult | undefined;
 	/** Active drag continuation / release hook owned by the active LayoutStrategy. */
 	onDragEvent?: (ev: TuiMouseEvent) => TuiMouseEventResult | undefined;
 }
@@ -51,11 +45,8 @@ export interface LayoutContext {
 	trimResponse: boolean;
 	cols: number;
 	rows: number;
-	buildSlotPanel(
-		id: Exclude<SlotPanel, null>,
-		slot: SlotName,
-		ctl: PanelCtl,
-	): Component;
+	/** The Messages region (pi's transcript or the response-only view). */
+	buildMessages(): Component;
 	buildBodyScroll?(
 		id: "thinking" | "tools",
 		ctl: PanelCtl,
@@ -122,28 +113,5 @@ export function stackEntry(stack: unknown, component: Component | undefined): an
 	const entries = (stack as { entries?: any[] } | undefined)?.entries;
 	return entries?.find((e) => e.component === component);
 }
-
-/** Grid state accessor injected into GridLayoutStrategy so split-view.ts owns
- * the shared slot/dimension variables without circular imports. */
-export interface GridStateAdapter {
-	getSlots(): LayoutSlots;
-	getDockSide(): DockSide;
-	getBandHeight(): number;
-	setBandHeight(h: number): void;
-	getToolsWidthPct(): number;
-	setToolsWidthPct(pct: number): void;
-	getFilesWidth(): number | null;
-	setFilesWidth(w: number | null): void;
-	getFlags(): { thinkingOn: boolean; toolsOn: boolean; filesOn: boolean; trimResponse: boolean };
-	getTerminalSize(): { cols: number; rows: number };
-	dockColsFor(cols: number): number;
-	dockColsForManual(cols: number, wanted: number): number;
-	bandToolsColsFor(bandCols: number): number;
-	requestRender(): void;
-	onUseBaseTranscript?(): void;
-}
-
-export const MIN_TERM_WIDTH = 90;
-export const MIN_ROWS_BELOW_BAND = 12;
 
 export default function (_pi: ExtensionAPI) {}

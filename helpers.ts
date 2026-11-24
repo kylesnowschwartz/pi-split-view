@@ -47,29 +47,6 @@ export function capToolText(s: string, cap = MAX_TOOL_TEXT_CHARS): string {
 	return marker + s.slice(end);
 }
 
-/** Band split minimums (cols) below which the tools ratio clamps. */
-export const MIN_THINK_COLS = 24;
-export const MIN_TOOLS_COLS = 20;
-
-/** Tools panel width (cols) for a band of `total` cols at `pct` percent,
- * with minimum clamps; falls back to the raw ratio when both minimums
- * cannot hold. */
-export function bandToolsColsFor(total: number, pct: number): number {
-	const raw = Math.round((total * pct) / 100);
-	let toolsW = raw;
-	let thinkW = total - toolsW;
-	if (toolsW < MIN_TOOLS_COLS) {
-		toolsW = MIN_TOOLS_COLS;
-		thinkW = total - toolsW;
-	}
-	if (thinkW < MIN_THINK_COLS) {
-		thinkW = MIN_THINK_COLS;
-		toolsW = total - thinkW;
-	}
-	if (toolsW < MIN_TOOLS_COLS) toolsW = raw;
-	return toolsW;
-}
-
 export const MIN_DOCK_COLS = 24;
 /** Columns the transcript side keeps when the files dock is resized. */
 export const DOCK_LEFT_RESERVE = 50;

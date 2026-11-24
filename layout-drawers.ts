@@ -280,9 +280,8 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 		return this.drag !== null;
 	}
 
-	panelVisible(id: PanelId, _hasFullscreenLayout: boolean): boolean {
-		if (!this.enabled) return false;
-		return id === "thinking" || id === "tools" || id === "messages";
+	panelVisible(_id: PanelId, _hasFullscreenLayout: boolean): boolean {
+		return this.enabled;
 	}
 
 	wantsLayer(): boolean {
@@ -461,8 +460,7 @@ export class DrawersLayoutStrategy implements LayoutStrategy {
 	compose(ctx: LayoutContext): Component {
 		this.resetGeometry();
 		this.lastCtx = ctx;
-		const msgCtl: PanelCtl = { id: "messages" };
-		const msgComp = ctx.buildSlotPanel("messages", "main", msgCtl);
+		const msgComp = ctx.buildMessages();
 		const thinkBuilt = this.buildDrawer("thinking", "Thinking", "accent", ctx);
 		const toolsBuilt = this.buildDrawer("tools", "Tool Usage", "muted", ctx);
 

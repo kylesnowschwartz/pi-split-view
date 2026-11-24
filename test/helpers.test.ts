@@ -5,7 +5,6 @@ import * as path from "node:path";
 import {
 	appendStreamTail,
 	bashPathCandidates,
-	bandToolsColsFor,
 	capDisplayLine,
 	capToolText,
 	dockColsFor,
@@ -37,13 +36,7 @@ import {
 	type ThinkingPalette,
 	type TurnSpan,
 } from "../helpers.ts";
-import {
-	assignSlot,
-	LAYOUT_PRESETS,
-	normalizeConfig,
-	type LayoutSlots,
-	type PresetName,
-} from "../ui-panels-config.ts";
+import { normalizeConfig } from "../ui-panels-config.ts";
 
 test("truncateInline collapses whitespace and never splits a surrogate pair", () => {
 	assert.equal(truncateInline("  a\n  b\tc  "), "a b c");
@@ -64,13 +57,6 @@ test("capToolText keeps the newest suffix with a marker, within the cap", () => 
 	const emoji = "😀".repeat(200);
 	const e = capToolText(emoji, 101).split("\n")[1];
 	assert.ok(e.length % 2 === 0 && e.startsWith("😀"));
-});
-
-test("bandToolsColsFor applies the ratio and minimum clamps", () => {
-	assert.equal(bandToolsColsFor(200, 35), 70);
-	assert.equal(bandToolsColsFor(60, 20), 20); // tools min 20
-	assert.equal(bandToolsColsFor(50, 60), 26); // think min 24
-	assert.equal(bandToolsColsFor(30, 50), 15); // both mins impossible → raw
 });
 
 test("dockColsFor: auto 25% clamped 34–48, manual clamped to the terminal", () => {
@@ -120,13 +106,10 @@ test("capDisplayLine keeps the newest chars with an ellipsis", () => {
 	assert.equal(capDisplayLine("0123456789abc", 8), "… 789abc"); // 8 units total
 });
 
-test("normalizeConfig: filesWidth is a validated optional number", () => {
-	assert.equal(normalizeConfig({}).filesWidth, null);
-	assert.equal(normalizeConfig({ filesWidth: 60 }).filesWidth, 60);
-	assert.equal(normalizeConfig({ filesWidth: 10 }).filesWidth, null);
-	assert.equal(normalizeConfig({ filesWidth: "60" as never }).filesWidth, null);
-	assert.equal(normalizeConfig({ filesWidth: 999 }).filesWidth, 200);
-	assert.equal(normalizeConfig(null as never).bandHeight, 20);
+test("normalizeConfig: a non-object root reads as an empty config", () => {
+	assert.deepEqual(normalizeConfig(null as never), normalizeConfig({}));
+	assert.deepEqual(normalizeConfig([] as never), normalizeConfig({}));
+	assert.deepEqual(normalizeConfig("x" as never), normalizeConfig({}));
 });
 
 test("normalizeConfig: thinkingScope is a strict turn|session read", () => {
@@ -365,187 +348,14 @@ test("bashPathCandidates skips globs, redirects, and unknown variables", () => {
 	assert.ok(!paths("cd $UNKNOWN && cat a.ts").includes("/a.ts"));
 });
 
-test("normalizeConfig: legacy config without slots derives slots from flags", () => {
-	const bare = normalizeConfig({});
-	assert.deepEqual(bare.slots, {
-		topLeft: null,
-		topRight: null,
-		main: "messages",
-		dock: null,
-	});
-	const classic = normalizeConfig({ split: true, files: true });
-	assert.deepEqual(classic.slots, {
-		topLeft: "thinking",
-		topRight: "tools",
-		main: "messages",
-		dock: "files",
-	});
-	assert.equal(classic.thinking, true);
-	assert.equal(classic.tools, true);
-	assert.equal(classic.files, true);
-	const thinkOnly = normalizeConfig({ split: true, tools: false });
-	assert.deepEqual(thinkOnly.slots, {
-		topLeft: "thinking",
-		topRight: null,
-		main: "messages",
-		dock: null,
-	});
-	// Invalid slots shape falls back to legacy flags.
-	const badSlots = normalizeConfig({ split: true, slots: "bad" as never });
-	assert.deepEqual(badSlots.slots, {
-		topLeft: "thinking",
-		topRight: "tools",
-		main: "messages",
-		dock: null,
-	});
-});
-
-test("normalizeConfig: explicit slots normalize, deduplicate, and sync flags", () => {
-	const wb = normalizeConfig({
-		slots: {
-			topLeft: "thinking",
-			topRight: "messages",
-			main: "tools",
-			dock: "files",
-		},
-	});
-	assert.deepEqual(wb.slots, {
-		topLeft: "thinking",
-		topRight: "messages",
-		main: "tools",
-		dock: "files",
-	});
-	assert.equal(wb.split, true);
-	assert.equal(wb.thinking, true);
-	assert.equal(wb.tools, true);
-	assert.equal(wb.files, true);
-
-	// Deduplication order: main, topLeft, topRight, dock.
-	const dedup = normalizeConfig({
-		slots: {
-			main: "tools",
-			topLeft: "tools",
-			topRight: "thinking",
-			dock: "thinking",
-		},
-	});
-	assert.deepEqual(dedup.slots, {
-		main: "tools",
-		topLeft: null,
-		topRight: "thinking",
-		dock: null,
-	});
-	assert.equal(dedup.tools, true);
-	assert.equal(dedup.thinking, true);
-	assert.equal(dedup.files, false);
-
-	// Invalid panel values become null; all-empty falls back to main: "messages".
-	const allBad = normalizeConfig({
-		slots: {
-			topLeft: "bogus" as never,
-			topRight: 123 as never,
-			main: null,
-			dock: null,
-		},
-	});
-	assert.deepEqual(allBad.slots, {
-		topLeft: null,
-		topRight: null,
-		main: "messages",
-		dock: null,
-	});
-	assert.equal(allBad.split, false);
-	assert.equal(allBad.thinking, false);
-	assert.equal(allBad.tools, false);
-	assert.equal(allBad.files, false);
-});
-
-test("LAYOUT_PRESETS: all 7 presets exist and normalize cleanly", () => {
-	const names: PresetName[] = [
-		"chat-left",
-		"drawers",
-		"classic",
-		"workbench",
-		"sidebar-chat",
-		"deep-think",
-		"focused-tools",
-	];
-	assert.deepEqual(Object.keys(LAYOUT_PRESETS).sort(), [...names].sort());
-	for (const name of names) {
-		const p = LAYOUT_PRESETS[name];
-		const norm = normalizeConfig({
-			slots: p.slots,
-			bandHeight: p.bandHeight,
-			toolsWidthPct: p.toolsWidthPct,
-			...(p.filesWidth === null ? {} : { filesWidth: p.filesWidth }),
-			...(p.dockSide ? { dockSide: p.dockSide } : {}),
-			...(p.layoutMode ? { layoutMode: p.layoutMode } : {}),
-			...(p.layoutState ? { layouts: { [p.layoutMode ?? "grid"]: p.layoutState } } : {}),
-		});
-		assert.deepEqual(norm.slots, p.slots);
-		assert.equal(norm.bandHeight, p.bandHeight);
-		assert.equal(norm.toolsWidthPct, p.toolsWidthPct);
-		assert.equal(norm.filesWidth, p.filesWidth);
-		assert.equal(norm.dockSide, p.dockSide ?? "right");
-		assert.equal(norm.layoutMode, p.layoutMode ?? "grid");
-	}
-	assert.equal(normalizeConfig({}).dockSide, "right");
-	assert.equal(normalizeConfig({ dockSide: "left" }).dockSide, "left");
-	assert.equal(normalizeConfig({ dockSide: "bogus" as any }).dockSide, "right");
-	assert.equal(normalizeConfig({}).layoutMode, "grid");
-	assert.equal(normalizeConfig({ layoutMode: "drawers" }).layoutMode, "drawers");
-	assert.equal(normalizeConfig({ layoutMode: "bogus" as any }).layoutMode, "grid");
+test("normalizeConfig: layouts keeps only object-valued entries", () => {
 	assert.deepEqual(
 		normalizeConfig({
-			layoutMode: "drawers",
 			layouts: { drawers: { thinking: { open: true, height: 12 } } },
 		}).layouts,
 		{ drawers: { thinking: { open: true, height: 12 } } },
 	);
 	assert.deepEqual(normalizeConfig({ layouts: "bad" as any }).layouts, {});
-});
-
-test("assignSlot assigns to empty slot, swaps occupied slots, and clears with null", () => {
-	const base: LayoutSlots = {
-		topLeft: "thinking",
-		topRight: null,
-		main: "messages",
-		dock: "files",
-	};
-	// Assign unplaced panel into empty slot.
-	const added = assignSlot(base, "topRight", "tools");
-	assert.deepEqual(added, {
-		topLeft: "thinking",
-		topRight: "tools",
-		main: "messages",
-		dock: "files",
-	});
-	// Swap two occupied slots (tools into main swaps messages into topRight).
-	const swapped = assignSlot(added, "main", "tools");
-	assert.deepEqual(swapped, {
-		topLeft: "thinking",
-		topRight: "messages",
-		main: "tools",
-		dock: "files",
-	});
-	// Move occupied panel into an empty slot (clears its old slot).
-	const moved = assignSlot(base, "topRight", "files");
-	assert.deepEqual(moved, {
-		topLeft: "thinking",
-		topRight: "files",
-		main: "messages",
-		dock: null,
-	});
-	// Clear a slot with null.
-	const cleared = assignSlot(added, "dock", null);
-	assert.deepEqual(cleared, {
-		topLeft: "thinking",
-		topRight: "tools",
-		main: "messages",
-		dock: null,
-	});
-	// Input object is not mutated.
-	assert.equal(base.topRight, null);
 });
 
 test("filesPanelRowBudget shows diff section only when enabled and an edit diff exists", () => {
@@ -797,25 +607,11 @@ test("normalizeConfig handles thinkingHud with strict boolean default true", () 
 	assert.equal(normalizeConfig({ thinkingHud: null as any }).thinkingHud, true);
 });
 
-test("normalizeConfig preserves regular-mode files: true when slots has no files slot", () => {
-	const regularFiles = normalizeConfig({
-		split: false,
-		thinking: false,
-		tools: false,
-		files: true,
-		slots: { topLeft: null, topRight: null, main: "messages", dock: null },
-	});
-	assert.equal(regularFiles.files, true);
-	assert.equal(regularFiles.slots.dock, null);
-
-	const hiddenFiles = normalizeConfig({
-		split: false,
-		thinking: false,
-		tools: false,
-		files: false,
-		slots: { topLeft: null, topRight: null, main: "messages", dock: null },
-	});
-	assert.equal(hiddenFiles.files, false);
+test("normalizeConfig reads files as a strict boolean defaulting to false", () => {
+	assert.equal(normalizeConfig({ files: true }).files, true);
+	assert.equal(normalizeConfig({ files: false }).files, false);
+	assert.equal(normalizeConfig({}).files, false);
+	assert.equal(normalizeConfig({ files: "yes" as any }).files, false);
 });
 
 test("pickThinkingHeadline skips generic filler openers when a signal line follows", () => {

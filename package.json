@@ -29,7 +29,6 @@
 		"tool-highlighter.ts",
 		"layout-manager.ts",
 		"layout-types.ts",
-		"layout-grid.ts",
 		"layout-drawers.ts",
 		"ui-panels-config.ts",
 		"README.md",
