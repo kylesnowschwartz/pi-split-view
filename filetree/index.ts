@@ -9,9 +9,14 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { type Component, HStack, VStack } from "@earendil-works/pi-tui";
-import { type PaneModel, TreePane } from "./pane.ts";
-import type { PaneTheme } from "./rows.ts";
+import { type Component, HStack, truncateToWidth, VStack, visibleWidth } from "@earendil-works/pi-tui";
+import { toolHudBadge } from "../helpers.ts";
+import { TreeController } from "./controller.ts";
+import { BRANCH_ICON } from "./icons.ts";
+import { nodeIo, type TreeIo } from "./io.ts";
+import { type PaneBody, type PaneModel, TreePane } from "./pane.ts";
+import { basename } from "./paths.ts";
+import { type PaneTheme, renderRow, type RowContext } from "./rows.ts";
 
 /** Saved state of the pane: shown or hidden, and its width in columns. */
 export interface TreeConfig {
@@ -23,6 +28,8 @@ export interface TreeConfig {
 export type TreeConfigInput = Partial<TreeConfig>;
 
 export interface FileTreeHost {
+	/** World access; Node's fs, child_process and timers when absent. */
+	io?: TreeIo;
 	requestRender(): void;
 	terminalSize(): { cols: number; rows: number };
 	theme(): PaneTheme | null;
@@ -79,20 +86,76 @@ export class FileTree {
 	private width = DEFAULT_TREE_WIDTH;
 	private split: TreeSplit | null = null;
 	private readonly pane: TreePane;
+	private readonly tree: TreeController;
 
 	constructor(private readonly host: FileTreeHost) {
+		this.tree = new TreeController(host.io ?? nodeIo(), {
+			changed: () => {
+				if (this.isVisible()) this.host.requestRender();
+			},
+			visible: () => this.isVisible(),
+		});
 		const model: PaneModel = {
 			theme: () => this.host.theme(),
 			height: () => this.host.terminalSize().rows,
-			header: () => "",
+			header: () => this.header(),
 			footer: () => "",
-			body: () => ({ lines: [], from: 0, total: 0, above: 0, below: 0 }),
-			clickRow: () => {},
+			body: (width, room) => this.body(width, room),
+			clickRow: (index) => {
+				this.tree.clickRow(index);
+			},
 			clickFooter: () => {},
-			wheel: () => {},
+			wheel: (delta) => this.tree.wheel(delta),
 			resize: (width) => this.setWidth(width),
 		};
 		this.pane = new TreePane(model);
+	}
+
+	/** Build the tree for a session's working directory. */
+	start(cwd: string): void {
+		void this.tree.start(cwd).catch(() => undefined);
+	}
+
+	/** Drop the tree and stop its timers. */
+	stop(): void {
+		this.tree.stop();
+	}
+
+	private header(): string {
+		const th = this.host.theme();
+		const t = this.tree;
+		if (!th || !t.root) return "";
+		const branch = t.git.branch ? th.fg("dim", `  ${BRANCH_ICON} ${t.git.branch.head}`) : "";
+		return th.fg("muted", ` ${basename(t.root) || "/"}`) + branch;
+	}
+
+	private body(width: number, room: number): PaneBody {
+		const th = this.host.theme();
+		const t = this.tree;
+		const win = t.window(room);
+		if (!th) return { lines: [], from: win.from, total: win.total, above: 0, below: 0 };
+		const light = th.appearance === "light";
+		const ctx: RowContext = {
+			theme: th,
+			root: t.root,
+			git: t.git,
+			ignored: t.ignored,
+			untracked: t.untracked,
+			selected: "",
+			width,
+			tick: 0,
+			mark: () => undefined,
+			badge: (tool) => toolHudBadge(tool, light),
+			widthOf: visibleWidth,
+			truncate: (text, w) => truncateToWidth(text, w, "…"),
+		};
+		return {
+			lines: win.rows.map((r) => renderRow(r, ctx)),
+			from: win.from,
+			total: win.total,
+			above: 0,
+			below: 0,
+		};
 	}
 
 	/** Whether the pane is switched on (it still hides on a narrow terminal). */

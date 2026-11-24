@@ -3350,6 +3350,7 @@ export default function (pi: ExtensionAPI) {
 		drawers.setEnabled(!noSplit);
 		drawers.hydrate(cfg.drawers);
 		fileTree.hydrate(cfg.tree);
+		if (ctx.mode === "tui") fileTree.start(ctx.cwd);
 		thinkingScope = cfg.thinkingScope;
 		thinkingMode = cfg.thinkingMode;
 		thinkingHudMode = cfg.thinkingHudMode;
@@ -3517,6 +3518,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (isLayoutLayerActive("ui")) setLayoutLayer("ui", null);
 		fileTree.unwrap();
+		fileTree.stop();
 		ctx.ui.setWidget(WIDGET_KEY, undefined);
 		widgetSet = false;
 	});
