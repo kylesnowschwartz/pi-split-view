@@ -9,6 +9,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { computeDrawerHeights, drawerBarLayout } from "./helpers.ts";
+import type { DrawersConfig, DrawersConfigInput } from "./ui-panels-config.ts";
 import {
 	type LayoutContext,
 	MeasurementSafeVStack,
@@ -500,7 +501,7 @@ export class DrawersLayout {
 		return stack;
 	}
 
-	serialize(): Record<string, unknown> {
+	serialize(): DrawersConfig {
 		return {
 			thinking: {
 				open: this.drawers.thinking.open,
@@ -513,23 +514,16 @@ export class DrawersLayout {
 		};
 	}
 
-	hydrate(raw: unknown): void {
-		if (!raw || typeof raw !== "object") return;
-		const obj = raw as Record<string, unknown>;
+	/** Apply saved drawer state; a drawer named in `saved` loses its manual pin. */
+	hydrate(saved: DrawersConfigInput): void {
 		for (const id of ["thinking", "tools"] as const) {
-			const item = obj[id];
-			if (!item || typeof item !== "object") continue;
-			const rec = item as Record<string, unknown>;
-			if (typeof rec.open === "boolean") {
-				this.drawers[id].open = rec.open;
-			}
-			if (
-				typeof rec.height === "number" &&
-				Number.isFinite(rec.height)
-			) {
+			const item = saved[id];
+			if (!item) continue;
+			if (item.open !== undefined) this.drawers[id].open = item.open;
+			if (item.height !== undefined) {
 				this.drawers[id].height = Math.max(
 					MIN_DRAWER_HEIGHT,
-					Math.min(MAX_DRAWER_HEIGHT, Math.round(rec.height)),
+					Math.min(MAX_DRAWER_HEIGHT, Math.round(item.height)),
 				);
 			}
 			this.drawers[id].manualPin = false;

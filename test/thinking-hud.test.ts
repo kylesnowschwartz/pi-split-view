@@ -437,33 +437,27 @@ test("selectFastThinkingModel picks fastest model in priority order", () => {
 	assert.equal(selectFastThinkingModel([fake("claude-opus-4-5")]), null);
 });
 
-test("normalizeConfig handles thinkingHudMode (ai|local|off) and legacy thinkingHud boolean", () => {
-	// Default: "ai" + thinkingHud: true
-	const def = normalizeConfig({});
-	assert.equal(def.thinkingHudMode, "ai");
-	assert.equal(def.thinkingHud, true);
+test("normalizeConfig reads thinkingHudMode (ai|local|off) strictly with default ai", () => {
+	assert.equal(normalizeConfig({}).thinkingHudMode, "ai");
 
 	// Explicit modes
+	assert.equal(normalizeConfig({ thinkingHudMode: "ai" }).thinkingHudMode, "ai");
 	assert.equal(normalizeConfig({ thinkingHudMode: "local" }).thinkingHudMode, "local");
-	assert.equal(normalizeConfig({ thinkingHudMode: "local" }).thinkingHud, true);
 	assert.equal(normalizeConfig({ thinkingHudMode: "off" }).thinkingHudMode, "off");
-	assert.equal(normalizeConfig({ thinkingHudMode: "off" }).thinkingHud, false);
-	assert.equal(normalizeConfig({ thinkingHudMode: "ai", thinkingHud: false }).thinkingHudMode, "ai");
-	assert.equal(normalizeConfig({ thinkingHudMode: "ai", thinkingHud: false }).thinkingHud, true);
 
-	// Legacy boolean fallback
-	assert.equal(normalizeConfig({ thinkingHud: false }).thinkingHudMode, "off");
-	assert.equal(normalizeConfig({ thinkingHud: false }).thinkingHud, false);
-	assert.equal(normalizeConfig({ thinkingHud: true }).thinkingHudMode, "ai");
-	assert.equal(normalizeConfig({ thinkingHud: true }).thinkingHud, true);
-
-	// Garbage mode falls back to legacy boolean or default "ai"
-	assert.equal(
-		normalizeConfig({ thinkingHudMode: "bogus" as any, thinkingHud: false }).thinkingHudMode,
-		"off",
-	);
+	// Garbage mode falls back to the default "ai"
 	assert.equal(
 		normalizeConfig({ thinkingHudMode: "bogus" as any }).thinkingHudMode,
+		"ai",
+	);
+	assert.equal(
+		normalizeConfig({ thinkingHudMode: false as any }).thinkingHudMode,
+		"ai",
+	);
+
+	// Only thinkingHudMode is read; a boolean `thinkingHud` key has no effect.
+	assert.equal(
+		normalizeConfig({ thinkingHud: false } as any).thinkingHudMode,
 		"ai",
 	);
 });

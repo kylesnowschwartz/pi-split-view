@@ -248,14 +248,44 @@ test("normalizeConfig reads responseSource strictly", () => {
 	assert.equal(normalizeConfig({ responseSource: "other" as any }).responseSource, "messages");
 });
 
-test("normalizeConfig: layouts keeps only object-valued entries", () => {
+test("normalizeConfig: drawers keeps only well-typed open and height per drawer", () => {
+	assert.deepEqual(normalizeConfig({}).drawers, {});
+	assert.deepEqual(normalizeConfig({ drawers: "bad" as any }).drawers, {});
+	assert.deepEqual(normalizeConfig({ drawers: [] as any }).drawers, {});
 	assert.deepEqual(
 		normalizeConfig({
-			layouts: { drawers: { thinking: { open: true, height: 12 } } },
-		}).layouts,
-		{ drawers: { thinking: { open: true, height: 12 } } },
+			drawers: {
+				thinking: { open: true, height: 12 },
+				tools: { open: false, height: 14 },
+			},
+		}).drawers,
+		{
+			thinking: { open: true, height: 12 },
+			tools: { open: false, height: 14 },
+		},
 	);
-	assert.deepEqual(normalizeConfig({ layouts: "bad" as any }).layouts, {});
+	assert.deepEqual(
+		normalizeConfig({
+			drawers: {
+				thinking: { open: "yes", height: "12" },
+				tools: { height: 9 },
+				other: { open: true },
+			} as any,
+		}).drawers,
+		{ thinking: {}, tools: { height: 9 } },
+	);
+});
+
+test("normalizeConfig ignores keys it does not know", () => {
+	const withExtras = normalizeConfig({
+		toolMode: "full",
+		slots: { main: "messages" },
+		layoutMode: "drawers",
+		layouts: { drawers: { thinking: { open: true } } },
+		thinkingHud: false,
+		bandHeight: 13,
+	} as any);
+	assert.deepEqual(withExtras, normalizeConfig({ toolMode: "full" }));
 });
 
 test("formatToolArgSummary formats read, edit, bash, grep, Agent, generic JSON, and non-JSON", () => {
@@ -466,16 +496,6 @@ test("styleThinkingLine maps each token kind through the palette", () => {
 		styleThinkingLine("**Goal**: wait, check `fn()` in helpers.ts via read (bug? maybe)", palette),
 		"<H:**Goal**>: <W:wait>, <V:check> <C:`fn()`> in <P:helpers.ts> via <T:read> (<E:bug>? <HY:maybe>)",
 	);
-});
-
-test("normalizeConfig handles thinkingHud with strict boolean default true", () => {
-	assert.equal(normalizeConfig({}).thinkingHud, true);
-	assert.equal(normalizeConfig({ thinkingHud: true }).thinkingHud, true);
-	assert.equal(normalizeConfig({ thinkingHud: false }).thinkingHud, false);
-	// Wrongly-typed values fall back to default true.
-	assert.equal(normalizeConfig({ thinkingHud: "false" as any }).thinkingHud, true);
-	assert.equal(normalizeConfig({ thinkingHud: 0 as any }).thinkingHud, true);
-	assert.equal(normalizeConfig({ thinkingHud: null as any }).thinkingHud, true);
 });
 
 test("pickThinkingHeadline skips generic filler openers when a signal line follows", () => {

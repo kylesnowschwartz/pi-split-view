@@ -4,10 +4,11 @@
  * ~/.pi/agent/ui-panels.json.
  *
  * Defaults: both drawers start collapsed. `toolMode` defaults to "compact".
+ * Keys this module does not know are ignored.
  *
  * IMPORTANT: the JSON on disk is a TEMPLATE of startup defaults, NOT live
  * state. Toggle commands only mutate in-process state (session-local);
- * only /split-save writes the current layout back to disk. This keeps
+ * only /split-save writes the current state back to disk. This keeps
  * concurrent pi windows from clobbering each other's panels.
  */
 
@@ -31,6 +32,25 @@ export type ThinkingScope = "turn" | "session";
 export type ThinkingMode = "compact" | "full";
 export type ThinkingHudMode = "ai" | "local" | "off";
 export type ResponseSource = "messages" | "transcript";
+
+/** Saved state of one drawer: expanded or collapsed, and its height in rows
+ * when expanded (frame rows included). */
+export interface DrawerConfig {
+	open: boolean;
+	height: number;
+}
+
+/** Saved state of the two drawers. */
+export interface DrawersConfig {
+	thinking: DrawerConfig;
+	tools: DrawerConfig;
+}
+
+/** Drawer state as read from disk: only well-typed fields are present. */
+export type DrawersConfigInput = Partial<
+	Record<keyof DrawersConfig, Partial<DrawerConfig>>
+>;
+
 export interface UiPanelsConfig {
 	/** Thinking panel buffer scope. Defaults to "session" (accumulate, the
 	 * pre-SV-27 behaviour) when absent. */
@@ -38,12 +58,9 @@ export interface UiPanelsConfig {
 	/** Thinking panel view mode: "compact" (collapsible 1-line-per-block cards)
 	 * or "full" (continuous prose). Defaults to "compact". */
 	thinkingMode?: ThinkingMode;
-	/** Inline semantic keyword highlighting in the Thinking panel. Defaults to
-	 * true when absent. Kept for backward compatibility with thinkingHudMode. */
-	thinkingHud?: boolean;
 	/** Thinking Semantic HUD mode: "ai" (Tier 1 local + Tier 2 async fast-AI),
 	 * "local" (Tier 1 local salience only), or "off" (plain thinkingText).
-	 * Defaults to "ai" (or "off" when legacy thinkingHud === false). */
+	 * Defaults to "ai". */
 	thinkingHudMode?: ThinkingHudMode;
 	/** Divider between successive assistant messages in response-only mode:
 	 * "rule" = dim dashed line, "space" = plain blank line. Defaults to "rule". */
@@ -60,8 +77,9 @@ export interface UiPanelsConfig {
 	 * tool calls, so other extensions' markdown transformers, custom entries
 	 * and custom messages render. Defaults to "messages". */
 	responseSource?: ResponseSource;
-	/** Opaque per-strategy saved state (e.g. layouts.drawers). */
-	layouts?: Record<string, Record<string, unknown>>;
+	/** Drawer state at startup. Absent drawers start collapsed at their
+	 * default height. */
+	drawers?: DrawersConfigInput;
 }
 
 /** SV-12: strict boolean read — only real booleans count; absent or
@@ -79,11 +97,10 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 	toolsScope: ToolsScope;
 	thinkingScope: ThinkingScope;
 	thinkingMode: ThinkingMode;
-	thinkingHud: boolean;
 	thinkingHudMode: ThinkingHudMode;
 	trimResponse: boolean;
 	responseSource: ResponseSource;
-	layouts: Record<string, Record<string, unknown>>;
+	drawers: DrawersConfigInput;
 }> {
 	// SV-12: tolerate any shape — a null root, an array or a primitive reads
 	// as an empty config instead of throwing on property access.
@@ -93,21 +110,24 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 			: {};
 	const tm: ToolMode = root.toolMode === "full" ? "full" : "compact";
 	const thinkingHudMode: ThinkingHudMode =
-		root.thinkingHudMode === "ai" ||
-		root.thinkingHudMode === "local" ||
-		root.thinkingHudMode === "off"
+		root.thinkingHudMode === "local" || root.thinkingHudMode === "off"
 			? root.thinkingHudMode
-			: root.thinkingHud === false
-				? "off"
-				: "ai";
+			: "ai";
 
-	const rawLayouts = root.layouts;
-	const layouts: Record<string, Record<string, unknown>> = {};
-	if (rawLayouts && typeof rawLayouts === "object" && !Array.isArray(rawLayouts)) {
-		for (const [k, v] of Object.entries(rawLayouts)) {
-			if (v && typeof v === "object" && !Array.isArray(v)) {
-				layouts[k] = { ...(v as Record<string, unknown>) };
-			}
+	// Strict read per drawer: `open` only as a real boolean, `height` only as
+	// a real finite number. The drawers layout clamps the height.
+	const drawers: DrawersConfigInput = {};
+	const rawDrawers: unknown = root.drawers;
+	if (rawDrawers && typeof rawDrawers === "object" && !Array.isArray(rawDrawers)) {
+		for (const id of ["thinking", "tools"] as const) {
+			const item = (rawDrawers as Record<string, unknown>)[id];
+			if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+			const rec = item as Record<string, unknown>;
+			const out: Partial<DrawerConfig> = {};
+			if (typeof rec.open === "boolean") out.open = rec.open;
+			if (typeof rec.height === "number" && Number.isFinite(rec.height))
+				out.height = rec.height;
+			drawers[id] = out;
 		}
 	}
 
@@ -122,12 +142,11 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 		// falls back to the "session" default, preserving the original behaviour.
 		thinkingScope: root.thinkingScope === "turn" ? "turn" : "session",
 		thinkingMode: root.thinkingMode === "full" ? "full" : "compact",
-		thinkingHud: thinkingHudMode !== "off",
 		thinkingHudMode,
 		trimResponse: boolOr(root.trimResponse, false),
 		// Strict read: only the literal "transcript" opts in.
 		responseSource: root.responseSource === "transcript" ? "transcript" : "messages",
-		layouts,
+		drawers,
 	};
 }
 

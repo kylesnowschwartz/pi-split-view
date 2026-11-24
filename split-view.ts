@@ -3330,9 +3330,7 @@ export default function (pi: ExtensionAPI) {
 		// --no-split: start bare, ignoring the saved ui-panels.json layout.
 		const noSplit = Boolean(pi.getFlag("no-split"));
 		drawers.setEnabled(!noSplit);
-		if (cfg.layouts.drawers) {
-			drawers.hydrate(cfg.layouts.drawers);
-		}
+		drawers.hydrate(cfg.drawers);
 		thinkingScope = cfg.thinkingScope;
 		thinkingMode = cfg.thinkingMode;
 		thinkingHudMode = cfg.thinkingHudMode;
@@ -3530,7 +3528,7 @@ export default function (pi: ExtensionAPI) {
 			} else {
 				const cfg = normalizeConfig(loadUiPanelsConfig());
 				drawers.setEnabled(true);
-				if (cfg.layouts.drawers) drawers.hydrate(cfg.layouts.drawers);
+				drawers.hydrate(cfg.drawers);
 				const base = getBaseRoot();
 				if (base && baseDockOf(base)) trimResponse = true;
 				reconcileLayout(ctx.ui.theme);
@@ -3892,11 +3890,8 @@ export default function (pi: ExtensionAPI) {
 				trimResponse,
 				thinkingScope,
 				thinkingMode,
-				thinkingHud: thinkingHudMode !== "off",
 				thinkingHudMode,
-				layouts: {
-					drawers: drawers.serialize(),
-				},
+				drawers: drawers.serialize(),
 				answerDivider: answerDividerMode,
 				responseSource,
 			});
