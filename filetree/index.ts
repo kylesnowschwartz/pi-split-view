@@ -15,7 +15,7 @@ import { TreeController } from "./controller.ts";
 import { BRANCH_ICON } from "./icons.ts";
 import { nodeIo, type TreeIo } from "./io.ts";
 import { type PaneBody, type PaneModel, TreePane } from "./pane.ts";
-import { basename } from "./paths.ts";
+import { basename, relative } from "./paths.ts";
 import { type Badge, type PaneTheme, renderRow, type RowContext, shimmer, TONE_TOOL } from "./rows.ts";
 
 /** Saved state of the pane: shown or hidden, and its width in columns. */
@@ -99,12 +99,12 @@ export class FileTree {
 			theme: () => this.host.theme(),
 			height: () => this.host.terminalSize().rows,
 			header: () => this.header(),
-			footer: () => "",
+			footer: (width) => this.footer(width),
 			body: (width, room) => this.body(width, room),
 			clickRow: (index) => {
 				this.tree.clickRow(index);
 			},
-			clickFooter: () => {},
+			clickFooter: () => this.tree.select(""),
 			wheel: (delta) => this.tree.wheel(delta),
 			resize: (width) => this.setWidth(width),
 		};
@@ -134,6 +134,45 @@ export class FileTree {
 	/** A prompt is about to run. */
 	promptStart(): void {
 		this.tree.promptStart();
+	}
+
+	/** The selected file's path below the tree root; "" when none is selected. */
+	selectedPath(): string {
+		const t = this.tree;
+		return t.selected ? relative(t.root, t.selected) : "";
+	}
+
+	/**
+	 * The note for the model about the selection, when it differs from the
+	 * last note given: the selected file, or that the selection was cleared.
+	 * null when the model already knows. The caller sends the note with the
+	 * next prompt.
+	 */
+	selectionNote(): string | null {
+		return this.tree.selectionNote();
+	}
+
+	/** Forget what the model was told, so the next prompt carries the
+	 * selection again (the conversation the note was in is gone or compacted). */
+	forgetSelectionNote(): void {
+		this.tree.forgetSelectionNote();
+	}
+
+	/** The selected file in the bottom border; the path keeps its end when it is too long. */
+	private footer(width: number): string {
+		const th = this.host.theme();
+		const path = this.selectedPath();
+		if (!th || !path) return "";
+		const room = width - 5;
+		if (room < 4) return "";
+		const chars = Array.from(path);
+		let shown = path;
+		if (visibleWidth(path) > room) {
+			let tail = chars.slice(-(room - 1));
+			while (tail.length > 1 && visibleWidth(tail.join("")) > room - 1) tail = tail.slice(1);
+			shown = `…${tail.join("")}`;
+		}
+		return `${th.fg("border", "─")} ${th.fg("accent", `● ${shown}`)} `;
 	}
 
 	private badge(tool: string): Badge {
@@ -173,7 +212,7 @@ export class FileTree {
 			git: t.git,
 			ignored: t.ignored,
 			untracked: t.untracked,
-			selected: "",
+			selected: t.selected,
 			width,
 			tick: t.tick,
 			mark: (id) => marks.get(id),

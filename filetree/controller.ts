@@ -8,7 +8,7 @@ import { foldFor, offscreen, scrollFor } from "./fold.ts";
 import { changedBetween, createGitWatch, createRefresher, type GitState, NO_GIT } from "./git.ts";
 import type { Timer, TreeIo } from "./io.ts";
 import { type Entry, type FileNode, replaceChildren, type Row, toNodes, visibleRows } from "./model.ts";
-import { ancestorsOf, dirname, inside, join, prunedUnder } from "./paths.ts";
+import { ancestorsOf, dirname, inside, join, prunedUnder, relative } from "./paths.ts";
 import type { RowMark } from "./rows.ts";
 import { TICK_MS } from "./timing.ts";
 import { scrolledBy } from "./viewport.ts";
@@ -32,6 +32,10 @@ export class TreeController {
 	nodes: FileNode[] = [];
 	expanded = new Set<string>();
 	git: GitState = NO_GIT;
+	/** The selected file; "" when none is. */
+	selected = "";
+	/** The selection the model was last told about. */
+	private notedSelection = "";
 	/** First drawn row. */
 	from = 0;
 	/** Animation frame counter; it advances only while a row is running. */
@@ -118,6 +122,8 @@ export class TreeController {
 		this.nodes = [];
 		this.expanded = new Set();
 		this.git = NO_GIT;
+		this.selected = "";
+		this.notedSelection = "";
 		this.gitSig = "";
 		this.ignoredSet = new Set();
 		this.untrackedSet = new Set();
@@ -209,13 +215,37 @@ export class TreeController {
 		this.host.changed();
 	}
 
-	/** A click on the drawn row `index`: a folder opens or closes. Returns the
-	 * clicked row. */
-	clickRow(index: number): Row | undefined {
+	/** A click on the drawn row `index`: a folder opens or closes; a file is
+	 * selected, and the selected file is cleared. */
+	clickRow(index: number): void {
 		const row = this.rows()[this.from + index];
-		if (!row || row.note) return undefined;
+		if (!row || row.note) return;
 		if (row.node.kind === "dir") this.toggleDir(row.node.id);
-		return row;
+		else this.select(row.node.id === this.selected ? "" : row.node.id);
+	}
+
+	/** The note for the model about the selection when it differs from the
+	 * last note given; null when the model already knows. */
+	selectionNote(): string | null {
+		if (this.selected === this.notedSelection) return null;
+		this.notedSelection = this.selected;
+		if (!this.selected)
+			return "The user cleared the file selection in the file tree sidebar. No file is selected now.";
+		return (
+			`The user selected a file in the file tree sidebar: ${relative(this.root, this.selected)} ` +
+			`(absolute path: ${this.selected}). When the user says "this file", "the selected file" ` +
+			"or similar without naming one, they mean this file. Do not read or change it unless the prompt asks for that."
+		);
+	}
+
+	forgetSelectionNote(): void {
+		this.notedSelection = "";
+	}
+
+	select(id: string): void {
+		if (id === this.selected) return;
+		this.selected = id;
+		this.host.changed();
 	}
 
 	toggleDir(id: string): void {
@@ -283,6 +313,7 @@ export class TreeController {
 		this.nodes = replaceChildren(this.nodes, listed, more);
 		const alive = new Set(this.nodes.map((n) => n.id));
 		for (const id of this.expanded) if (!alive.has(id)) this.expanded.delete(id);
+		if (this.selected && !alive.has(this.selected)) this.selected = "";
 		this.touch();
 	}
 

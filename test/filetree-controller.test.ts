@@ -439,3 +439,48 @@ test("folders opened by hand close only when marked rows need the room, and only
 	io.advance(CLOSE_INTERVAL_MS);
 	assert.ok(!tree.expanded.has("/r/d05"), "the paced close runs when the interval ends");
 });
+
+// ─── selection ──────────────────────────────────────────────────────────────
+
+test("a click selects a file, a second click clears it, and a folder click never selects", async () => {
+	const { tree } = await make(base());
+	tree.clickRow(2);
+	assert.equal(tree.selected, "/r/a.ts");
+	tree.clickRow(2);
+	assert.equal(tree.selected, "");
+	tree.clickRow(1);
+	await settle();
+	assert.equal(tree.selected, "");
+	tree.clickRow(3);
+	assert.equal(tree.selected, "/r/src/b.ts");
+	tree.clickRow(4);
+	assert.equal(tree.selected, "/r/a.ts");
+});
+
+test("the selection note goes out once per change, names the file, and reports a cleared selection", async () => {
+	const { tree } = await make(base());
+	assert.equal(tree.selectionNote(), null);
+	tree.select("/r/src/b.ts");
+	const note = tree.selectionNote();
+	assert.match(note ?? "", /src\/b\.ts/);
+	assert.match(note ?? "", /\/r\/src\/b\.ts/);
+	assert.equal(tree.selectionNote(), null);
+	tree.select("");
+	assert.match(tree.selectionNote() ?? "", /No file is selected/);
+	assert.equal(tree.selectionNote(), null);
+	tree.select("/r/a.ts");
+	tree.select("");
+	assert.equal(tree.selectionNote(), null, "a selection made and cleared between prompts sends nothing");
+});
+
+test("a forgotten note is sent again, and a selected file that is deleted is deselected", async () => {
+	const w = base();
+	const { tree } = await make(w);
+	tree.select("/r/a.ts");
+	assert.ok(tree.selectionNote());
+	tree.forgetSelectionNote();
+	assert.match(tree.selectionNote() ?? "", /a\.ts/);
+	w.dirs["/r"] = w.dirs["/r"]!.filter(([name]) => name !== "a.ts");
+	await tree.sync();
+	assert.equal(tree.selected, "");
+});

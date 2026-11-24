@@ -3388,8 +3388,14 @@ export default function (pi: ExtensionAPI) {
 			}, 0);
 		}
 	});
-	pi.on("session_tree", (_e, ctx) => reconstruct(ctx));
-	pi.on("session_compact", (_e, ctx) => reconstruct(ctx));
+	pi.on("session_tree", (_e, ctx) => {
+		fileTree.forgetSelectionNote();
+		reconstruct(ctx);
+	});
+	pi.on("session_compact", (_e, ctx) => {
+		fileTree.forgetSelectionNote();
+		reconstruct(ctx);
+	});
 
 	// Thinking stream.
 	pi.on("message_update", (event, ctx) => {
@@ -3439,10 +3445,17 @@ export default function (pi: ExtensionAPI) {
 		if (anyPanelActive()) requestRender();
 	});
 
-	// The file tree reads git before each run, so what a bash call changes
-	// is compared against a current state.
-	pi.on("before_agent_start", () => {
+	// Before each run the file tree reads git, so what a bash call changes is
+	// compared against a current state, and a changed file selection goes to
+	// the model as a hidden message. The visible prompt stays as typed.
+	pi.on("before_agent_start", (event) => {
 		fileTree.promptStart();
+		if (event.messageType !== "user" || !anyPanelActive()) return;
+		const note = fileTree.selectionNote();
+		if (!note) return;
+		return {
+			message: { customType: "split-view-tree-selection", content: note, display: false },
+		};
 	});
 
 	// Tool stream.
