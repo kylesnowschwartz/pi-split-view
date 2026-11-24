@@ -84,7 +84,6 @@
  */
 
 import {
-	generateDiffString,
 	getLanguageFromPath,
 	highlightCode,
 	renderDiff,
@@ -105,7 +104,6 @@ import {
 	getImageDimensions,
 	imageFallback,
 	type Component,
-	type OverlayHandle,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 	wrapTextWithAnsi,
@@ -154,11 +152,8 @@ import { DrawersLayoutStrategy } from "./layout-drawers.ts";
 import {
 	alignTurnSpans,
 	appendStreamTail,
-	bashPathCandidates,
 	capDisplayLine,
 	capToolText,
-	dockColsFor as dockColsForManual,
-	filesPanelRowBudget,
 	formatDuration,
 	formatToolArgSummary,
 	headTailPreview,
@@ -183,9 +178,6 @@ import {
 	type ToolsScope,
 	type TurnSpan,
 } from "./helpers.ts";
-import { existsSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import * as path from "node:path";
 
 const WIDGET_KEY = "split-view";
 const MAX_TOOLS = 60;
@@ -197,8 +189,6 @@ const MAX_LINES = 400;
 // flush. Bounded by dropping its older HALF on overflow (appendStreamTail),
 // so the visible paragraph re-flows once per ~8K chars, not on every flush.
 const MAX_TAIL_CHARS = 16000;
-const MAX_FILES = 500;
-const MIN_TERM_WIDTH = 90;
 const MAX_TOOL_OUTPUT_LINES = 80;
 /** Max lines rendered in an expanded rich bash/read/write card when not zoomed. */
 const MAX_EXPANDED_RICH_LINES = 40;
@@ -217,9 +207,6 @@ const MAX_UNWINDOWED_ROWS = MAX_BODY_ROWS * 4;
 // Hard cap on raw chars per logical line (giant-line guard). ≥ MAX_TAIL_CHARS
 // so the streaming tail is never cut by a sliding (re-flowing) window.
 const MAX_LINE_CHARS = MAX_TAIL_CHARS;
-/** Legend shown at the bottom of the files list. */
-const LEGEND = "r read · w write · s seen(bash) · a subagent";
-
 // ─── module-lifetime state ───────────────────────────────────────────────────
 
 let tuiRef: any;
@@ -231,29 +218,21 @@ let startupTimer: ReturnType<typeof setTimeout> | null = null;
  * paint) or by the deferred startup timer as a fallback. */
 let startupPending = false;
 
-// Overlay registry for the regular-mode files panel (survives /reload).
-const REG_KEY = Symbol.for("pi.explored-files");
+// Module generation counter (survives /reload): deferred callbacks of a
+// replaced module instance compare it and do nothing.
+const REG_KEY = Symbol.for("pi.split-view");
 interface Registry {
 	gen: number;
-	active?: OverlayHandle | null;
-	activeGen?: number;
-	/** The overlay's component, stored so the extension — the valid lifecycle
-	 * owner — can dispose it on close/shutdown (Option C: no ctx.ui.custom()
-	 * promise exists to dispose it for us). decisions/D-overlay-lifecycle.md */
-	panel?: FilesPanel | null;
 }
 const G = globalThis as Record<symbol, Registry>;
 const REG: Registry = G[REG_KEY] ?? { gen: 0 };
 G[REG_KEY] = REG;
 const MY_GEN = ++REG.gen;
 
-/** Terminal height, captured by the overlay's visible callback each render. */
-let termHeight = 0;
-
 /** SV-27: "turn" = the thinking panel carries the current turn only (the
  * buffer is cleared on each new user message); "session" = accumulate every
- * turn (default, the pre-SV-27 behaviour). Session-local;
- * /split-thinking-scope, persisted by /split-save. */
+ * turn (default). Session-local; /split-thinking-scope, persisted by
+ * /split-save. */
 let thinkingScope: ThinkingScope = "session";
 let thinkingMode: ThinkingMode = "compact";
 const thinkingExpandOverrides = new Map<number, boolean>();
@@ -289,9 +268,6 @@ function enqueueRecentThinkingLines(maxLines = 8): void {
 		enqueueThinkingAiLine(recent[i]!);
 	}
 }
-/** Files panel edit-diff subpanel (session-local; /split-diff, persisted by
- * /split-save). Off keeps the file list but drops the bottom diff section. */
-let showDiff = true;
 /** Response-only divider between successive assistant messages: "rule" (dim
  * dashed line) or "space" (plain blank line). Session-local; /split-divider,
  * persisted by /split-save. */
@@ -339,8 +315,6 @@ let trimResponse = false;
  * Transient: never persisted. */
 // PanelId is imported from ./layout-types.ts.
 let zoomed: PanelId | null = null;
-
-const dockColsFor = (cols: number) => dockColsForManual(cols, null);
 
 /** SV-08: fingerprint of the live theme's panel-relevant colors, captured
  * when the composition was built. pi replaces the global theme object on a
@@ -1104,127 +1078,6 @@ function toolItems(theme: Theme, width: number): BodyItem[] {
 
 const toolsVersion = () => toolsVersionCounter;
 
-// ─── files buffer ────────────────────────────────────────────────────────────
-
-interface FileEntry {
-	path: string;
-	ops: string;
-	count: number;
-}
-const files = new Map<string, FileEntry>();
-let filesVersion = 0;
-
-function pathsFrom(
-	toolName: string,
-	input: any,
-): { abs: string; op: string }[] {
-	const out: { abs: string; op: string }[] = [];
-	if (toolName === "bash") {
-		const cmd = typeof input?.command === "string" ? input.command : "";
-		for (const abs of bashPathCandidates(cmd, process.cwd(), homedir())) {
-			try {
-				if (existsSync(abs) && statSync(abs).isFile()) out.push({ abs, op: "s" });
-			} catch {
-				/* skip */
-			}
-		}
-		return out;
-	}
-	const add = (v: unknown, op: string, unconditional: boolean) => {
-		if (typeof v !== "string" || !v) return;
-		try {
-			const abs = path.resolve(v);
-			if (!unconditional && (!existsSync(abs) || !statSync(abs).isFile())) return;
-			out.push({ abs, op });
-		} catch {
-			/* skip */
-		}
-	};
-	if (toolName === "read") {
-		add(input?.path, "r", true);
-		return out;
-	}
-	if (toolName === "write" || toolName === "edit") {
-		add(input?.path, "w", true);
-		return out;
-	}
-	for (const key of ["path", "filePath", "file_path", "imagePath"])
-		add(input?.[key], "r", false);
-	for (const key of ["paths", "files", "filePaths"]) {
-		if (Array.isArray(input?.[key]))
-			for (const v of input[key]) add(v, "r", false);
-	}
-	return out;
-}
-
-function record(toolName: string, input: any): void {
-	const seen = new Set<string>();
-	for (const { abs, op } of pathsFrom(toolName, input)) {
-		if (seen.has(abs)) continue;
-		seen.add(abs);
-		const prev = files.get(abs);
-		if (prev) {
-			files.delete(abs);
-			prev.count++;
-			if (!prev.ops.includes(op)) prev.ops += op;
-			files.set(abs, prev);
-		} else {
-			if (files.size >= MAX_FILES)
-				files.delete(files.keys().next().value as string);
-			files.set(abs, { path: abs, ops: op, count: 1 });
-		}
-	}
-	filesVersion++;
-}
-
-function bumpFilesVersion(): void {
-	filesVersion++;
-}
-
-const recentEntries = (): FileEntry[] => [...files.values()].reverse();
-
-function displayPath(abs: string): string {
-	const rel = path.relative(process.cwd(), abs);
-	if (rel && !rel.startsWith("..")) return rel;
-	const home = homedir();
-	if (abs.startsWith(home + path.sep)) return `~${abs.slice(home.length)}`;
-	return abs;
-}
-
-// ─── edit-diff buffer ────────────────────────────────────────────────────────
-
-/**
- * Raw (unrendered) diff state for the files panel's bottom subpanel.
- * We store raw text (not ANSI) so it survives theme changes; `renderDiff` is
- * applied at draw time. A monotonic token guards against out-of-order async
- * diff computations overwriting a newer edit with a stale older one.
- */
-const editDiff = {
-	path: "" as string,
-	diff: "" as string,
-	version: 0,
-	token: 0,
-};
-let pendingDiffToken = 0;
-/** SV-23: edit preview/result correlation. Every edit tool_call gets a
- * monotonically increasing generation and owns the preview; a tool_result
- * applies its authoritative diff only when its toolCallId maps to the current
- * generation, so an older, slower edit can never overwrite a newer preview. */
-let editGeneration = 0;
-const editGenByCallId = new Map<string, number>();
-
-function setEditDiff(p: string, diff: string): void {
-	editDiff.path = p;
-	editDiff.diff = diff;
-	editDiff.version++;
-}
-
-function clearEditDiff(): void {
-	editDiff.path = "";
-	editDiff.diff = "";
-	editDiff.version++;
-}
-
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
 function requestRender(): void {
@@ -1235,11 +1088,9 @@ function requestRender(): void {
 	}
 }
 
-const anyPanelActive = () =>
-	isLayoutLayerActive("ui") || isLayoutLayerActive("files") || !!REG.active;
+const anyPanelActive = () => isLayoutLayerActive("ui");
 /** /split state: the drawers layer is wanted. */
 const panelsActive = () => drawersStrategy.wantsLayer();
-const filesActive = () => isLayoutLayerActive("files") || !!REG.active;
 
 // ─── mouse: drag-resize, header buttons, wheel routing ───────────────────────
 
@@ -2842,156 +2693,6 @@ class RichToolsBody implements Component {
 	dispose(): void {}
 }
 
-// ─── files panel (list + edit-diff subpanel) ──────────────────────────────────
-
-class FilesPanel {
-	private cacheKey = "";
-	private cacheLines: string[] = [];
-
-	constructor(
-		private theme: Theme,
-		/** Fullscreen dock: live terminal rows. Overlay: undefined. */
-		private heightProvider?: () => number,
-		/** Mouse wiring (dock / zoom only; the regular-mode overlay has none). */
-		private ctl?: PanelCtl,
-	) {}
-
-	handleMouse(ev: TuiMouseEvent): TuiMouseEventResult | undefined {
-		const where =
-			ev.y === 0 ? "top" : ev.y >= ev.height - 1 ? "bottom" : "body";
-		return panelMouse(ev, this.ctl, where);
-	}
-
-	// No handleInput: the regular-mode overlay is nonCapturing, so it never
-	// receives keys — Escape belongs to the editor/Pi, and /files is the
-	// close/reopen path (Option C, decisions/D-overlay-lifecycle.md).
-
-	render(width: number): string[] {
-		if (REG.gen !== MY_GEN) return [];
-		const height =
-			this.heightProvider?.() || termHeight || recentEntries().length + 12;
-		const { showDiffSection, listRows, diffRows } = filesPanelRowBudget(
-			height,
-			showDiff,
-			Boolean(editDiff.diff),
-		);
-		// Cache key MUST include height and showDiffSection: a height-only
-		// terminal resize or toggling/acquiring an edit diff changes the
-		// list/diff row split without bumping filesVersion or width.
-		const key = `${filesVersion}|${editDiff.version}|${width}|${height}|${showDiffSection ? 1 : 0}`;
-		if (key === this.cacheKey) return this.cacheLines;
-
-		const th = this.theme;
-		const inner = Math.max(1, width - 2);
-		const pad = (s: string) =>
-			s + " ".repeat(Math.max(0, inner - visibleWidth(s)));
-		const row = (c: string) =>
-			th.fg("border", "│") + pad(truncateToWidth(c, inner)) + th.fg("border", "│");
-
-		const entries = recentEntries();
-
-		const meta = (e: FileEntry) =>
-			th.fg("muted", `${e.ops}${e.count > 1 ? `×${e.count}` : ""}`);
-
-		const rows: { line: string; files: number }[] = [];
-		let i = 0;
-		while (i < entries.length) {
-			const dir = path.dirname(entries[i].path);
-			let j = i;
-			while (j < entries.length && path.dirname(entries[j].path) === dir) j++;
-			const run = entries.slice(i, j);
-			if (run.length > 3) {
-				const label = displayPath(dir);
-				rows.push({
-					line: row(` ${th.fg("accent", label === "." ? "./" : `${label}/`)}`),
-					files: 0,
-				});
-				for (const e of run)
-					rows.push({
-						line: row(`   ${meta(e)} ${th.fg("text", path.basename(e.path))}`),
-						files: 1,
-					});
-			} else {
-				for (const e of run)
-					rows.push({
-						line: row(` ${meta(e)} ${th.fg("text", path.basename(e.path))}`),
-						files: 1,
-					});
-			}
-			i = j;
-		}
-
-		const body: string[] = [];
-		let filesShown = 0;
-		for (const r of rows) {
-			if (body.length >= listRows - 2) break;
-			body.push(r.line);
-			filesShown += r.files;
-		}
-		if (body.length === 0 && entries.length === 0)
-			body.push(row(` ${th.fg("dim", "No files touched yet")}`));
-		if (entries.length > filesShown)
-			body.push(row(` ${th.fg("dim", `… +${entries.length - filesShown} more`)}`));
-		body.push(row(` ${th.fg("dim", LEGEND)}`));
-		while (body.length < listRows) body.push(row(""));
-
-		// ── edit-diff subpanel (optional: /split-diff, shown only when an edit exists) ──
-		const diffBody: string[] = [];
-		if (showDiffSection) {
-			diffBody.push(th.fg("border", `├${"─".repeat(inner)}┤`));
-			// SV-05: truncate the title by DISPLAY COLUMNS (wide/CJK/emoji paths)
-			// and compute the fill from the truncated title's visible width, so the
-			// title can never overrun the fill and collide with the right border.
-			// Budget: leading " ✎ " + trailing " " around the path text.
-			const title = editDiff.path
-				? th.fg("accent", ` ✎ ${truncateToWidth(displayPath(editDiff.path), inner - 4, "…")} `)
-				: th.fg("dim", " Last Edit ");
-			const titleFill = "─".repeat(
-				Math.max(0, inner - visibleWidth(title)),
-			);
-			diffBody.push(
-				th.fg("border", "│") +
-					title +
-					th.fg("border", titleFill) +
-					th.fg("border", "│"),
-			);
-
-			const rendered = renderDiff(editDiff.diff).split(/\r?\n/);
-			// SV-06: cap content one row below the pad target so the "… +N more"
-			// marker always fits; the section is then padded to diffRows so the
-			// frame closes on the last row.
-			const shown = rendered.slice(0, Math.max(0, diffRows - 1));
-			for (const l of shown) diffBody.push(row(` ${l}`));
-			if (rendered.length > shown.length && diffRows > 0)
-				diffBody.push(
-					row(` ${th.fg("dim", `… +${rendered.length - shown.length} more`)}`),
-				);
-			while (diffBody.length < diffRows + 2) diffBody.push(row(""));
-		}
-
-		const out = [
-			this.ctl && inner >= HEADER_BUTTONS_MIN
-				? th.fg("border", `╭${"─".repeat(inner - 6)}`) +
-					headerButtons(th, this.ctl.id) +
-					th.fg("border", "╮")
-				: th.fg("border", `╭${"─".repeat(inner)}╮`),
-			row(` ${th.fg("accent", `📂 Files (${entries.length})`)}`),
-			th.fg("border", `├${"─".repeat(inner)}┤`),
-			...body,
-			...diffBody,
-			th.fg("border", `╰${"─".repeat(inner)}╯`),
-		];
-		this.cacheKey = key;
-		this.cacheLines = out;
-		return out;
-	}
-
-	invalidate(): void {
-		this.cacheKey = "";
-	}
-	dispose(): void {}
-}
-
 // ─── layout composition (one layer) ──────────────────────────────────────────
 
 interface BandDef {
@@ -3560,7 +3261,7 @@ function reconcileLayout(theme: Theme): void {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag("no-split", {
-		description: "Start bare: skip the split-view panels (thinking/tools/files)",
+		description: "Start bare: skip the split-view drawers (Thinking / Tool Usage)",
 		type: "boolean",
 		default: false,
 	});
@@ -3644,9 +3345,6 @@ export default function (pi: ExtensionAPI) {
 		suppressNextPinClear = false;
 		activeStrategy().onReconstruct?.();
 		toolsVersionCounter++;
-		files.clear();
-		bumpFilesVersion();
-		clearEditDiff();
 		rebuildResponseDoc(ctx);
 
 		const branch = activeContextEntries(ctx);
@@ -3677,7 +3375,6 @@ export default function (pi: ExtensionAPI) {
 							// branch through the same ingest path live events use.
 							if (typeof c.id === "string")
 								ingestToolCall(c.id, c.name, c.arguments ?? {});
-							record(c.name, c.arguments ?? {});
 						} catch {
 							/* skip */
 						}
@@ -3690,14 +3387,6 @@ export default function (pi: ExtensionAPI) {
 					turn: Math.max(1, currentTurn),
 					thoughts: msgThoughts,
 				});
-			// Reconstruct the last edit diff from persisted tool-result details.
-			if (msg.role === "toolResult" && msg.toolName === "edit") {
-				const d = msg.details;
-				if (d?.diff) {
-					const p = (msg.input && msg.input.path) || editDiff.path;
-					setEditDiff(p, d.diff);
-				}
-			}
 			// SV-17: rebuild tool outputs from persisted results, correlated
 			// to their calls by toolCallId.
 			if (msg.role === "toolResult" && typeof msg.toolCallId === "string") {
@@ -3758,7 +3447,6 @@ export default function (pi: ExtensionAPI) {
 		toolsScope = cfg.toolsScope;
 		toolExpandGlobal = null;
 		zoomed = null;
-		showDiff = cfg.diff;
 		answerDividerMode = cfg.answerDivider;
 		trimResponse = noSplit ? false : cfg.trimResponse;
 		responseSource = cfg.responseSource;
@@ -3784,9 +3472,6 @@ export default function (pi: ExtensionAPI) {
 							startupPending = false;
 							reconcileLayout(ctx.ui.theme);
 						}
-					} else if (cfg.files && !noSplit) {
-						// Regular mode shows the files panel as an overlay.
-						toggleFilesPanel(ctx);
 					}
 				} catch {
 					/* never crash pi from a deferred callback */
@@ -3883,73 +3568,7 @@ export default function (pi: ExtensionAPI) {
 		if (anyPanelActive()) requestRender();
 	});
 
-	// Edit diff: preview on tool_call (preflight args), authoritative on result.
-	pi.on("tool_call", (event) => {
-		if (event.toolName !== "edit") {
-			// Still record files for non-edit tools (write/read/bash/grep...).
-			try {
-				record(event.toolName, event.input ?? {});
-			} catch {
-				/* skip */
-			}
-			bumpFilesVersion();
-			if (anyPanelActive()) requestRender();
-			return;
-		}
-		const input = event.input ?? {};
-		const p = typeof input.path === "string" ? input.path : "";
-		const edits = Array.isArray(input.edits) ? input.edits : [];
-		const token = ++pendingDiffToken;
-		// SV-23: this call is the newest edit — it owns the preview; forget
-		// older generations so a late result from an older edit cannot match.
-		const gen = ++editGeneration;
-		editGenByCallId.clear();
-		if (typeof event.toolCallId === "string")
-			editGenByCallId.set(event.toolCallId, gen);
-		// Compute a diff from the edit pairs (synchronous, no file read needed).
-		// generateDiffString(oldText, newText, contextLines) produces a unified diff.
-		const parts: string[] = [];
-		for (const e of edits) {
-			const o = typeof e.oldText === "string" ? e.oldText : "";
-			const n = typeof e.newText === "string" ? e.newText : "";
-			if (o !== n) parts.push(generateDiffString(o, n, 3).diff);
-		}
-		if (token !== pendingDiffToken) return;
-		if (parts.length) setEditDiff(p, parts.join("\n"));
-		try {
-			record("edit", input);
-		} catch {
-			/* skip */
-		}
-		bumpFilesVersion();
-		if (anyPanelActive()) requestRender();
-	});
-	pi.on("tool_result", (event) => {
-		if (event.toolName !== "edit") return;
-		// Authoritative diff from the result details (branch-correct).
-		const d = (event as any).details;
-		if (d?.diff) {
-			// SV-23: apply only when this result belongs to the current edit
-			// generation (its own preview); an older result never overwrites a
-			// newer preview. A result with no/unknown ID applies only when
-			// unambiguous (a single edit generation, no recorded ID).
-			const id = (event as any).toolCallId;
-			const gen = typeof id === "string" ? editGenByCallId.get(id) : undefined;
-			const applies =
-				gen === editGeneration ||
-				(gen === undefined &&
-					editGeneration === 1 &&
-					editGenByCallId.size === 0);
-			if (applies) {
-				const inputPath = (event as any).input?.path;
-				const p = typeof inputPath === "string" ? inputPath : editDiff.path;
-				setEditDiff(p, d.diff);
-				if (anyPanelActive()) requestRender();
-			}
-		}
-	});
-
-	// Subagent tool calls: record files with "a" op AND tool panel entries.
+	// Subagent tool calls: tool panel entries with an [agent] badge.
 	pi.events.on("subagents:tool_call", (data) => {
 		const { toolName, input, agent } = (data ?? {}) as {
 			toolName?: string;
@@ -3957,26 +3576,6 @@ export default function (pi: ExtensionAPI) {
 			agent?: string;
 		};
 		if (!toolName) return;
-		// Files tracking with "a" op.
-		try {
-			for (const { abs } of pathsFrom(toolName, input ?? {})) {
-				const prev = files.get(abs);
-				if (prev) {
-					files.delete(abs);
-					prev.count++;
-					if (!prev.ops.includes("a")) prev.ops += "a";
-					files.set(abs, prev);
-				} else {
-					if (files.size >= MAX_FILES)
-						files.delete(files.keys().next().value as string);
-					files.set(abs, { path: abs, ops: "a", count: 1 });
-				}
-			}
-			bumpFilesVersion();
-		} catch {
-			/* never break the listener */
-		}
-		// Tool panel entry with [agent] badge.
 		const id = `sub:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`;
 		toolOrder.push(id);
 		toolsBy.set(id, {
@@ -4008,82 +3607,10 @@ export default function (pi: ExtensionAPI) {
 			clearTimeout(startupTimer);
 			startupTimer = null;
 		}
-		// SV-02/SV-15 (Option C): retire the overlay through the same valid
-		// owner for the CURRENT generation AND for a stale one. The
-		// identity-specific handle's hide() removes only its own entry (a safe
-		// no-op if Pi already removed it — it never pops an unrelated topmost
-		// overlay), and the stored component is disposed with it. Never merely
-		// forget REG.active: an undisposed stale-generation panel keeps
-		// rendering blank.
-		if (REG.active) {
-			REG.active.hide();
-			REG.active = null;
-		}
-		if (REG.panel) {
-			REG.panel.dispose();
-			REG.panel = null;
-		}
-		REG.activeGen = undefined;
 		if (isLayoutLayerActive("ui")) setLayoutLayer("ui", null);
 		ctx.ui.setWidget(WIDGET_KEY, undefined);
 		widgetSet = false;
 	});
-
-	// ── panel toggles ──
-
-	/** Toggle the files panel overlay. */
-	const toggleFilesPanel = (ctx: ExtensionContext): boolean => {
-		if (ctx.mode !== "tui") {
-			ctx.ui.notify("/files requires interactive mode", "error");
-			return filesActive();
-		}
-		// Regular mode: passive TUI overlay (Option C — decisions/D-overlay-lifecycle.md).
-		// No ctx.ui.custom() promise is created, so nothing can be stranded; the
-		// extension owns the lifecycle: the identity-specific OverlayHandle is
-		// the only close path, and the panel component is disposed with it.
-		// Escape belongs to the editor/Pi — /files is the close/reopen path.
-		if (REG.active) {
-			const wasStale = REG.activeGen !== MY_GEN;
-			// SV-15: retire even a stale-generation overlay through the same
-			// valid owner (handle hide + component dispose) instead of merely
-			// forgetting REG.active.
-			REG.active.hide();
-			REG.panel?.dispose();
-			REG.active = null;
-			REG.panel = null;
-			REG.activeGen = undefined;
-			if (!wasStale) {
-				ctx.ui.notify("Files panel closed", "info");
-				return false;
-			}
-			// A stale overlay was retired — fall through and open a fresh one
-			// so a single /files leaves exactly one live overlay.
-		}
-		if ((process.stdout.columns ?? 0) < MIN_TERM_WIDTH) {
-			ctx.ui.notify(`Terminal too narrow (min ${MIN_TERM_WIDTH} cols)`, "warning");
-			return false;
-		}
-		if (!tuiRef || typeof tuiRef.showOverlay !== "function") {
-			ctx.ui.notify("/files requires interactive mode", "error");
-			return false;
-		}
-		const panel = new FilesPanel(ctx.ui.theme);
-		const cols = tuiRef?.terminal?.columns ?? process.stdout.columns ?? 0;
-		REG.panel = panel;
-		REG.active = tuiRef.showOverlay(panel, {
-			anchor: "top-right",
-			width: dockColsFor(cols),
-			margin: 0,
-			maxHeight: "100%",
-			nonCapturing: true,
-			visible: (w: number, h: number) => {
-				termHeight = h;
-				return w >= MIN_TERM_WIDTH;
-			},
-		});
-		REG.activeGen = MY_GEN;
-		return true;
-	};
 
 	pi.registerCommand("split", {
 		description:
@@ -4218,23 +3745,6 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			ctx.ui.notify("Usage: /split-drawer <thinking|tools>", "info");
-		},
-	});
-
-	pi.registerCommand("files", {
-		description: "Toggle the files panel (dock or overlay)",
-		handler: async (_args, ctx) => {
-			toggleFilesPanel(ctx);
-		},
-	});
-
-	pi.registerCommand("split-diff", {
-		description: "Toggle the files panel's edit-diff subpanel",
-		handler: async (_args, ctx) => {
-			showDiff = !showDiff;
-			filesVersion++;
-			requestRender();
-			ctx.ui.notify(`Edit diff ${showDiff ? "on" : "off"}`, "info");
 		},
 	});
 
@@ -4482,13 +3992,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("split-save", {
 		description: "Save current panel layout as the startup defaults",
 		handler: async (_args, ctx) => {
-			// SV-11: a regular-mode files overlay of the CURRENT generation counts
-			// as files-on; an overlay left over from a stale generation must not
-			// save a phantom panel.
-			const filesEffective = REG.active != null && REG.activeGen === MY_GEN;
 			// SV-13: report the real outcome — success only after a durable write.
 			const saved = saveUiPanelsConfig({
-				files: filesEffective,
 				toolMode,
 				toolsScope,
 				trimResponse,
@@ -4499,7 +4004,6 @@ export default function (pi: ExtensionAPI) {
 				layouts: {
 					drawers: drawersStrategy.serialize(),
 				},
-				diff: showDiff,
 				answerDivider: answerDividerMode,
 				responseSource,
 			});

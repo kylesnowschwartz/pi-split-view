@@ -4,11 +4,8 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import {
 	appendStreamTail,
-	bashPathCandidates,
 	capDisplayLine,
 	capToolText,
-	dockColsFor,
-	filesPanelRowBudget,
 	formatDuration,
 	formatToolArgSummary,
 	headTailPreview,
@@ -57,15 +54,6 @@ test("capToolText keeps the newest suffix with a marker, within the cap", () => 
 	const emoji = "😀".repeat(200);
 	const e = capToolText(emoji, 101).split("\n")[1];
 	assert.ok(e.length % 2 === 0 && e.startsWith("😀"));
-});
-
-test("dockColsFor: auto 25% clamped 34–48, manual clamped to the terminal", () => {
-	assert.equal(dockColsFor(100), 34);
-	assert.equal(dockColsFor(160), 40);
-	assert.equal(dockColsFor(400), 48);
-	assert.equal(dockColsFor(160, 70), 70);
-	assert.equal(dockColsFor(160, 10), 24);
-	assert.equal(dockColsFor(160, 150), 110); // keeps 50 cols for the left side
 });
 
 test("formatDuration", () => {
@@ -321,33 +309,6 @@ test("normalizeConfig reads responseSource strictly", () => {
 	assert.equal(normalizeConfig({ responseSource: "other" as any }).responseSource, "messages");
 });
 
-test("bashPathCandidates resolves words against the cd target and the home directory", () => {
-	const paths = (command: string) => bashPathCandidates(command, "/work", "/home/me");
-	assert.deepEqual(paths("cat src/a.ts"), ["/work/cat", "/work/src/a.ts"]);
-	assert.ok(paths("cd pkg && head -30 CHANGELOG.md").includes("/work/pkg/CHANGELOG.md"));
-	assert.ok(paths("cd ~/notes; cat todo.md").includes("/home/me/notes/todo.md"));
-	assert.ok(paths("cat ~/.config/app.json").includes("/home/me/.config/app.json"));
-	assert.ok(paths("cd /srv && cd logs && tail app.log | rg error").includes("/srv/logs/app.log"));
-	assert.ok(paths("cd && cat x").includes("/home/me/x"));
-	assert.ok(paths("cd - && cat x").includes("/work/x"));
-});
-
-test("bashPathCandidates gives loop and assigned variables their values", () => {
-	const paths = (command: string) => bashPathCandidates(command, "/work", "/home/me");
-	const loop = paths('cd docs && for f in a b; do echo "== $f"; cat $f.md; done');
-	assert.ok(loop.includes("/work/docs/a.md") && loop.includes("/work/docs/b.md"));
-	assert.ok(paths("P=~/src; cd $P && cat ${P}/x.ts main.ts").includes("/home/me/src/x.ts"));
-	assert.ok(paths("P=~/src; cd $P && cat main.ts").includes("/home/me/src/main.ts"));
-	assert.ok(paths('d=lib; cat "$d/index.ts"').includes("/work/lib/index.ts"));
-});
-
-test("bashPathCandidates skips globs, redirects, and unknown variables", () => {
-	const paths = (command: string) => bashPathCandidates(command, "/work", "/home/me");
-	assert.deepEqual(paths("cat $UNKNOWN/a.ts *.md 2>/dev/null"), ["/work/cat"]);
-	assert.deepEqual(paths("p=$(pwd); cat $p/a.ts"), ["/work/cat"]);
-	assert.ok(!paths("cd $UNKNOWN && cat a.ts").includes("/a.ts"));
-});
-
 test("normalizeConfig: layouts keeps only object-valued entries", () => {
 	assert.deepEqual(
 		normalizeConfig({
@@ -356,35 +317,6 @@ test("normalizeConfig: layouts keeps only object-valued entries", () => {
 		{ drawers: { thinking: { open: true, height: 12 } } },
 	);
 	assert.deepEqual(normalizeConfig({ layouts: "bad" as any }).layouts, {});
-});
-
-test("filesPanelRowBudget shows diff section only when enabled and an edit diff exists", () => {
-	// No diff yet (even with showDiff: true) → full list rows, no diff rows.
-	assert.deepEqual(filesPanelRowBudget(30, true, false), {
-		showDiffSection: false,
-		listRows: 26,
-		diffRows: 0,
-	});
-	// Diff exists and showDiff: true → split rows (exact row accounting: listRows + diffRows + 6 === height).
-	const split = filesPanelRowBudget(30, true, true);
-	assert.deepEqual(split, {
-		showDiffSection: true,
-		listRows: 11,
-		diffRows: 13,
-	});
-	assert.equal(split.listRows + split.diffRows + 6, 30);
-	// Diff exists but showDiff: false → full list rows, no diff rows.
-	assert.deepEqual(filesPanelRowBudget(30, false, true), {
-		showDiffSection: false,
-		listRows: 26,
-		diffRows: 0,
-	});
-	// Very short height clamps safely.
-	assert.deepEqual(filesPanelRowBudget(4, true, false), {
-		showDiffSection: false,
-		listRows: 1,
-		diffRows: 0,
-	});
 });
 
 test("formatToolArgSummary formats read, edit, bash, grep, Agent, generic JSON, and non-JSON", () => {
@@ -605,13 +537,6 @@ test("normalizeConfig handles thinkingHud with strict boolean default true", () 
 	assert.equal(normalizeConfig({ thinkingHud: "false" as any }).thinkingHud, true);
 	assert.equal(normalizeConfig({ thinkingHud: 0 as any }).thinkingHud, true);
 	assert.equal(normalizeConfig({ thinkingHud: null as any }).thinkingHud, true);
-});
-
-test("normalizeConfig reads files as a strict boolean defaulting to false", () => {
-	assert.equal(normalizeConfig({ files: true }).files, true);
-	assert.equal(normalizeConfig({ files: false }).files, false);
-	assert.equal(normalizeConfig({}).files, false);
-	assert.equal(normalizeConfig({ files: "yes" as any }).files, false);
 });
 
 test("pickThinkingHeadline skips generic filler openers when a signal line follows", () => {

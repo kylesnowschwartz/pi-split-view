@@ -1,10 +1,9 @@
 /**
  * ui-panels-config.ts — persistent config for the split-view extension
- * (Thinking / Tool Usage drawers, files overlay, Messages options). Stored at
+ * (Thinking / Tool Usage drawers, Messages options). Stored at
  * ~/.pi/agent/ui-panels.json.
  *
- * Defaults: both drawers start collapsed; files defaults OFF. `toolMode`
- * defaults to "compact".
+ * Defaults: both drawers start collapsed. `toolMode` defaults to "compact".
  *
  * IMPORTANT: the JSON on disk is a TEMPLATE of startup defaults, NOT live
  * state. Toggle commands only mutate in-process state (session-local);
@@ -46,10 +45,6 @@ export interface UiPanelsConfig {
 	 * "local" (Tier 1 local salience only), or "off" (plain thinkingText).
 	 * Defaults to "ai" (or "off" when legacy thinkingHud === false). */
 	thinkingHudMode?: ThinkingHudMode;
-	/** Files overlay panel (regular, non-fullscreen mode). */
-	files?: boolean;
-	/** Files panel edit-diff subpanel. Defaults to true when absent. */
-	diff?: boolean;
 	/** Divider between successive assistant messages in response-only mode:
 	 * "rule" = dim dashed line, "space" = plain blank line. Defaults to "rule". */
 	answerDivider?: "rule" | "space";
@@ -79,8 +74,6 @@ function boolOr(value: unknown, fallback: boolean): boolean {
 
 /** Normalize raw config with defaults (never throws). */
 export function normalizeConfig(raw: UiPanelsConfig): Required<{
-	files: boolean;
-	diff: boolean;
 	answerDivider: "rule" | "space";
 	toolMode: ToolMode;
 	toolsScope: ToolsScope;
@@ -119,8 +112,6 @@ export function normalizeConfig(raw: UiPanelsConfig): Required<{
 	}
 
 	return {
-		files: boolOr(root.files, false),
-		diff: boolOr(root.diff, true),
 		answerDivider: root.answerDivider === "space" ? "space" : "rule",
 		toolMode: tm,
 		toolsScope:

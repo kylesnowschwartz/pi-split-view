@@ -47,18 +47,6 @@ export function capToolText(s: string, cap = MAX_TOOL_TEXT_CHARS): string {
 	return marker + s.slice(end);
 }
 
-export const MIN_DOCK_COLS = 24;
-/** Columns the transcript side keeps when the files dock is resized. */
-export const DOCK_LEFT_RESERVE = 50;
-
-/** Files dock width: auto = 25% clamped to 34–48 cols; a manual width is
- * clamped to [MIN_DOCK_COLS, cols - DOCK_LEFT_RESERVE]. */
-export function dockColsFor(cols: number, manual: number | null = null): number {
-	if (manual === null) return Math.max(34, Math.min(48, Math.floor(cols * 0.25)));
-	const max = Math.max(MIN_DOCK_COLS, cols - DOCK_LEFT_RESERVE);
-	return Math.max(MIN_DOCK_COLS, Math.min(max, Math.trunc(manual)));
-}
-
 /** Compact duration: 0.4s · 2.3s · 42s · 3m05s · 1h02m. `live` drops the
  * sub-second digit so a running counter ticks once per second. */
 export function formatDuration(ms: number, live = false): string {
@@ -264,110 +252,6 @@ export function keepsInResponseOnly(child: TranscriptChild): boolean {
 		(part: any) =>
 			part?.type === "text" && typeof part.text === "string" && part.text.trim(),
 	);
-}
-
-/** Most values one shell variable can stand for in bashPathCandidates. */
-const MAX_VARIABLE_VALUES = 64;
-
-/** Strip the quotes and punctuation a shell word carries around a path. */
-function bareWord(raw: string): string {
-	return raw.replace(/^[("'`]+/, "").replace(/[)"'`;:,]+$/, "");
-}
-
-/** A leading `~` or `~/` becomes the home directory. */
-function expandHome(word: string, home: string): string {
-	if (word === "~") return home;
-	return word.startsWith("~/") ? path.join(home, word.slice(2)) : word;
-}
-
-/** Every reading of `word` once its `$name` and `${name}` references are
- * replaced by the known values. Empty when a reference is unknown. */
-function expandVariables(word: string, variables: Map<string, string[]>): string[] {
-	let readings = [word];
-	const reference = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/;
-	for (;;) {
-		const match = reference.exec(readings[0]!);
-		if (!match) return readings;
-		const values = variables.get(match[1] ?? match[2]!);
-		if (!values) return [];
-		readings = readings.flatMap((reading) =>
-			values.map((value) => reading.replace(match[0], () => value)),
-		);
-		if (readings.length > MAX_VARIABLE_VALUES) return [];
-	}
-}
-
-/**
- * Absolute paths that the words of a bash command may name. The caller keeps
- * the ones that are files.
- *
- * Words resolve against the directory the command is in at that point: `cwd`,
- * then the target of each `cd`. A leading `~` is the home directory. A
- * `name=value` assignment and the word list of a `for name in …` loop give
- * `$name` its values, so `cat $f.md` in a loop names one file per loop word.
- * Words with globs, redirects, or a variable of unknown value are skipped.
- */
-export function bashPathCandidates(command: string, cwd: string, home: string): string[] {
-	const out: string[] = [];
-	const variables = new Map<string, string[]>();
-	const literal = (word: string) => !/[|&><`$*?]/.test(word);
-	let dir = cwd;
-	for (const segment of command.split(/&&|\|\||[;|&\n]/)) {
-		const words = segment.split(/\s+/).map(bareWord).filter(Boolean);
-		while (["do", "then", "else", "{", "("].includes(words[0] ?? "")) words.shift();
-		if (words[0] === "cd") {
-			const targets = words[1] ? expandVariables(words[1], variables) : [home];
-			if (targets.length === 1 && literal(targets[0]!) && targets[0] !== "-")
-				dir = path.resolve(dir, expandHome(targets[0]!, home));
-			continue;
-		}
-		if (words[0] === "for" && words[2] === "in") {
-			const values = words.slice(3).flatMap((word) => expandVariables(word, variables));
-			if (values.length > 0 && values.length <= MAX_VARIABLE_VALUES && values.every(literal))
-				variables.set(words[1]!, values);
-			else variables.delete(words[1]!);
-			continue;
-		}
-		for (const word of words) {
-			const assignment = /^([A-Za-z_]\w*)=(.*)$/.exec(word);
-			if (assignment) {
-				const values = expandVariables(bareWord(assignment[2]!), variables);
-				if (values.length > 0 && values.every(literal)) variables.set(assignment[1]!, values);
-				else variables.delete(assignment[1]!);
-				continue;
-			}
-			if (word.startsWith("-")) continue;
-			for (const reading of expandVariables(word, variables)) {
-				if (!literal(reading)) continue;
-				out.push(path.resolve(dir, expandHome(reading, home)));
-			}
-		}
-	}
-	return out;
-}
-
-/**
- * Row budget for the Files panel (list + optional Last Edit diff subpanel).
- * The diff section is shown only when both enabled (`showDiff`) and an edit
- * diff actually exists (`hasEditDiff`); otherwise all rows go to the file list.
- */
-export function filesPanelRowBudget(
-	height: number,
-	showDiff: boolean,
-	hasEditDiff: boolean,
-): { showDiffSection: boolean; listRows: number; diffRows: number } {
-	const showDiffSection = showDiff && hasEditDiff;
-	if (!showDiffSection) {
-		return {
-			showDiffSection: false,
-			listRows: Math.max(1, height - 4),
-			diffRows: 0,
-		};
-	}
-	const half = Math.max(6, Math.floor(height / 2));
-	const listRows = Math.max(2, half - 4);
-	const diffRows = Math.max(0, height - listRows - 6);
-	return { showDiffSection: true, listRows, diffRows };
 }
 
 function shortenHomePath(p: string): string {
