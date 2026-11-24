@@ -1,8 +1,8 @@
 /**
  * layout-manager.ts — shared owner of pi's single fullscreen layout-root slot.
  *
- * Both split-view and explored-files wrap the layout root. If each captured
- * `tui.layoutRoot` and restored it independently, closing one panel would
+ * Anything that wraps the layout root goes through here. If each wrapper
+ * captured `tui.layoutRoot` and restored it independently, closing one would
  * discard the other's wrap (they'd fight over one slot). This manager owns the
  * slot: it captures the true base root once, keeps an ordered set of active
  * "layers" (each a wrap builder), and on any toggle rebuilds the composition
@@ -145,10 +145,9 @@ export function resetLayoutManager(): void {
 }
 
 /**
- * This module is a shared utility imported by split-view.ts and explored-files.ts.
- * pi auto-discovers every *.ts file in this directory as an extension and
- * requires a default factory export, so expose a no-op one here. The named
- * exports above are what the other extensions actually use.
+ * This module is a shared utility imported by split-view.ts. pi auto-discovers
+ * every *.ts file in this directory as an extension and requires a default
+ * factory export, so expose a no-op one here.
  */
 export default function (_pi: ExtensionAPI) {
 	/* no-op: this is a shared layout module, not a real extension */

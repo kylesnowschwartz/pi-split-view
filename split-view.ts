@@ -1,37 +1,37 @@
 /**
- * split-view.ts — unified panel TUI extension
+ * split-view.ts — drawers view TUI extension
  *
- * One extension owns the whole "split the main window" surface:
- *   - thinking panel  (top-left band)
- *   - tools panel     (top-right band)
- *   - files panel     (right dock side column, with an edit-diff subpanel)
+ * One layout, composed in ONE layer owned by layout-manager (fullscreen):
  *
- * Layout (fullscreen, composed in ONE layer owned by layout-manager):
+ *   VStack(
+ *     Messages            pi's transcript, or the response-only doc
+ *     editor dock         pi's own pending/status/editor/footer, reused verbatim
+ *     Thinking drawer     one-row bar when collapsed, framed panel when open
+ *     Tool Usage drawer   one-row bar when collapsed, framed panel when open
+ *   )
  *
- *   band on?  files on?
- *   ─────────────────────────────────────
- *   both  → HStack(VStack(band, transcript), filesDock)
- *   band  → VStack(band, transcript)
- *   files → HStack(transcript, filesDock)
- *   none  → transcript (no layer)
+ * layout-drawers.ts owns the drawer state, geometry and drag handling; this
+ * file owns the buffers, the panel bodies and chrome, the Messages region,
+ * events and commands. A drawer's [↗] zooms its panel over the whole area
+ * above the editor dock. With the drawers off (/split, --no-split) no layer
+ * is set and pi's own layout shows. The drawers need the layout engine and
+ * only work in fullscreen.
  *
- * With trimResponse on, "transcript" above is replaced by the response doc
- * ScrollView + the base root's reused editor dock (works standalone, without
- * band or files).
- *
- * Regular (non-fullscreen) mode: the files panel falls back to a non-capturing
- * overlay; the band needs the layout engine and only works in fullscreen.
+ * With trimResponse on, Messages is the response doc ScrollView instead of
+ * pi's transcript.
  *
  * Commands:
- *   /split              full toggle pair: OFF = all panels off (bare pi
- *                       layout), ON = the panel flags saved as startup defaults
- *   /split-thinking     toggle the thinking panel within the band
- *   /split-tools        toggle the tools panel within the band
- *   /files              toggle the files panel (dock in fullscreen, overlay otherwise)
- *   /split-tools-view   toggle tool panel compact ↔ full detail
+ *   /split              toggle the drawers view: OFF = bare pi layout, ON =
+ *                       drawers with the drawer state saved as startup defaults
+ *   /split-thinking     toggle the Thinking drawer open/closed
+ *   /split-tools        toggle the Tool Usage drawer open/closed
+ *   /split-drawer <id>  toggle a drawer: thinking | tools
+ *   /split-thinking-scope / -view / -hud   Thinking body options
+ *   /split-tools-view / -expand / -live    Tool Usage body options
+ *   /split-turn         page Thinking and Tool Usage by turn
  *   /split-trim-response toggle panel C: pi transcript ↔ response-only view
- *   /split-height <n>   set the top band height in rows (6–40)
- *   /split-save       persist current layout as startup defaults for NEW
+ *   /split-response-source / /split-divider   response-only options
+ *   /split-save       persist current state as startup defaults for NEW
  *                     windows (toggles are session-local by default, so
  *                     concurrent pi windows don't clobber each other)
  *
@@ -75,10 +75,10 @@
  * wrapped/styled output on a (version, width) key; unchanged frames are O(1).
  * requestRender() is gated on any panel being active.
  *
- * Mouse (fullscreen): header [↗]/[×] buttons zoom / hide a panel; drag the
- * band bottom border (height), the tools panel's left edge (split) and the
- * files dock's left edge (width). Drags mutate the composed stack entries in
- * place (applyGeometry) so panel scroll positions survive.
+ * Mouse (fullscreen): click a drawer bar to open / close it, [↗] zooms it,
+ * the zoomed header's [↙]/[×] leave the zoom; drag an open drawer's top
+ * border to resize it. Drags mutate the composed stack entries in place
+ * (applyGeometry) so panel scroll positions survive.
  *
  * Shortcuts (ctrl+o/ctrl+t) are dropped: reserved built-ins, un-registrable.
  */
@@ -178,7 +178,7 @@ import {
 const WIDGET_KEY = "split-view";
 const MAX_TOOLS = 60;
 // Display window (logical lines) for the thinking panel. The full transcript
-// keeps everything; the band is a recent-history view. Must stay small: the
+// keeps everything; the drawer is a recent-history view. Must stay small: the
 // per-flush render cost is dominated by wrapping the visible window.
 const MAX_LINES = 400;
 // A newline-free streaming tail grows char by char and re-wraps on every
@@ -190,7 +190,7 @@ const MAX_TOOL_OUTPUT_LINES = 80;
 const MAX_EXPANDED_RICH_LINES = 40;
 /** Lines of an edit's unified diff kept per tool entry (zoomed tools view). */
 const MAX_TOOL_DIFF_LINES = 150;
-// OracleSpec body window: hard cap on FINAL VISUAL rows rendered by band
+// OracleSpec body window: hard cap on FINAL VISUAL rows rendered by drawer
 // panels (logical lines can wrap into many). Wrapped rows are memoized per
 // line, so only changed lines (the streaming tail) re-wrap on a flush.
 const MAX_BODY_ROWS = 400;
@@ -298,11 +298,11 @@ let suppressNextPinClear = false;
  * reading); only the user exits it, or the entry disappearing (eviction,
  * session rebuild) clears it. Session-local. */
 let liveToolId: string | null = null;
-/** The tools panel's body ScrollView (band or zoomed; set on compose), so
+/** The tools panel's body ScrollView (drawer or zoomed; set on compose), so
  * entering / leaving live mode can jump to the end of the swapped content
  * instead of keeping a scroll offset that points into unrelated rows. */
 let toolsScroll: ScrollView | null = null;
-/** The thinking panel's RecentBody (band or zoomed; set on compose), so
+/** The thinking panel's body (drawer or zoomed; set on compose), so
  * toggling /split-thinking-hud can invalidate its per-line wrap memo immediately. */
 let thinkingBody: { invalidate(): void } | null = null;
 /** Panel C: response-only view instead of pi's transcript (persisted). */
