@@ -16,7 +16,7 @@ import { BRANCH_ICON } from "./icons.ts";
 import { nodeIo, type TreeIo } from "./io.ts";
 import { type PaneBody, type PaneModel, TreePane } from "./pane.ts";
 import { basename } from "./paths.ts";
-import { type PaneTheme, renderRow, type RowContext } from "./rows.ts";
+import { type Badge, type PaneTheme, renderRow, type RowContext, shimmer, TONE_TOOL } from "./rows.ts";
 
 /** Saved state of the pane: shown or hidden, and its width in columns. */
 export interface TreeConfig {
@@ -121,12 +121,44 @@ export class FileTree {
 		this.tree.stop();
 	}
 
+	/** A tool call started (tool_execution_start). */
+	toolStart(id: string, tool: string, args: unknown): void {
+		this.tree.toolStart(id, tool, args);
+	}
+
+	/** A tool call ended (tool_execution_end), in success or failure. */
+	toolEnd(id: string, isError: boolean, result: unknown): void {
+		this.tree.toolEnd(id, isError, result);
+	}
+
+	/** A prompt is about to run. */
+	promptStart(): void {
+		this.tree.promptStart();
+	}
+
+	private badge(tool: string): Badge {
+		return toolHudBadge(tool, this.host.theme()?.appearance === "light");
+	}
+
+	/** The root's name and branch. A call on the root itself (a search of the
+	 * whole tree) shows here, as it would on a row. */
 	private header(): string {
 		const th = this.host.theme();
 		const t = this.tree;
 		if (!th || !t.root) return "";
+		const name = basename(t.root) || "/";
+		const mark = t.marks().get(t.root);
+		let label = th.fg("muted", name);
+		if (mark?.state === "running") {
+			const badge = this.badge(mark.tool);
+			label = `${badge.ansiColor}${badge.icon}\x1b[39m ${shimmer(name, badge.ansiColor, t.tick, th)}`;
+		} else if (mark) {
+			label = mark.error
+				? th.fg("error", name)
+				: `${this.badge(TONE_TOOL[mark.kind]).ansiColor}${name}\x1b[39m`;
+		}
 		const branch = t.git.branch ? th.fg("dim", `  ${BRANCH_ICON} ${t.git.branch.head}`) : "";
-		return th.fg("muted", ` ${basename(t.root) || "/"}`) + branch;
+		return ` ${label}${branch}`;
 	}
 
 	private body(width: number, room: number): PaneBody {
@@ -134,7 +166,7 @@ export class FileTree {
 		const t = this.tree;
 		const win = t.window(room);
 		if (!th) return { lines: [], from: win.from, total: win.total, above: 0, below: 0 };
-		const light = th.appearance === "light";
+		const marks = t.marks();
 		const ctx: RowContext = {
 			theme: th,
 			root: t.root,
@@ -143,9 +175,9 @@ export class FileTree {
 			untracked: t.untracked,
 			selected: "",
 			width,
-			tick: 0,
-			mark: () => undefined,
-			badge: (tool) => toolHudBadge(tool, light),
+			tick: t.tick,
+			mark: (id) => marks.get(id),
+			badge: (tool) => this.badge(tool),
 			widthOf: visibleWidth,
 			truncate: (text, w) => truncateToWidth(text, w, "…"),
 		};

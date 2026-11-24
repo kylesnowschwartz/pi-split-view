@@ -3439,10 +3439,17 @@ export default function (pi: ExtensionAPI) {
 		if (anyPanelActive()) requestRender();
 	});
 
+	// The file tree reads git before each run, so what a bash call changes
+	// is compared against a current state.
+	pi.on("before_agent_start", () => {
+		fileTree.promptStart();
+	});
+
 	// Tool stream.
 	pi.on("tool_execution_start", (event) => {
 		// SV-17: same ingest path the branch rebuild uses.
 		ingestToolCall(event.toolCallId, event.toolName, event.args, Date.now());
+		fileTree.toolStart(event.toolCallId, event.toolName, event.args);
 		drawers.onToolStart();
 		if (anyPanelActive()) requestRender();
 	});
@@ -3464,6 +3471,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_execution_end", (event) => {
 		// SV-17: same ingest path the branch rebuild uses.
 		ingestToolResult(event.toolCallId, (event as any).result, event.isError, Date.now());
+		fileTree.toolEnd(event.toolCallId, event.isError, (event as any).result);
 		// Live mode is NOT left here: the user may still be reading the output.
 		// The pinned tool keeps its final text (status turns to finished/failed);
 		// any other finished streamer drops its raw stream text.

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MAX_DIR_ENTRIES, TreeController } from "../filetree/controller.ts";
+import { HOLD_MS, TICK_MS } from "../filetree/timing.ts";
 import { fakeIo, settle, type World } from "./filetree-world.ts";
 
 const base = (): World => ({
@@ -182,4 +183,142 @@ test("the poll syncs when the index changes and on every fifth poll, and rests w
 	await settle();
 	assert.equal(statuses(), first + 2);
 	tree.stop();
+});
+
+// ─── tool calls ─────────────────────────────────────────────────────────────
+
+const stateOf = (tree: TreeController) =>
+	Object.fromEntries([...tree.marks()].map(([id, m]) => [id, `${m.state}:${m.tool}${m.error ? ":error" : ""}`]));
+
+test("a read runs on its row from start to end, opens the folders above it, then holds for the hold time", async () => {
+	const { io, tree } = await make(base());
+	tree.toolStart("c1", "read", { path: "src/deep/c.ts" });
+	await settle();
+	assert.deepEqual(stateOf(tree), { "/r/src/deep/c.ts": "running:read" });
+	assert.ok(ids(tree).includes("/r/src/deep/c.ts"));
+	io.advance(30_000);
+	assert.deepEqual(stateOf(tree), { "/r/src/deep/c.ts": "running:read" });
+	tree.toolEnd("c1", false, { content: [{ type: "text", text: "x" }] });
+	await settle();
+	assert.deepEqual(stateOf(tree), { "/r/src/deep/c.ts": "recent:read" });
+	io.advance(HOLD_MS - 1);
+	assert.deepEqual(stateOf(tree), { "/r/src/deep/c.ts": "recent:read" });
+	io.advance(1);
+	assert.deepEqual(stateOf(tree), {});
+	assert.ok(ids(tree).includes("/r/src/deep/c.ts"), "the folders stay open after the hold");
+});
+
+test("the animation timer runs only while a row is running", async () => {
+	const { io, tree } = await make(base());
+	const idle = io.pending();
+	tree.toolStart("c1", "read", { path: "a.ts" });
+	await settle();
+	assert.equal(io.pending(), idle + 1);
+	const before = tree.tick;
+	io.advance(TICK_MS * 3);
+	assert.equal(tree.tick, before + 3);
+	tree.toolEnd("c1", false, "");
+	await settle();
+	io.advance(TICK_MS * 3);
+	assert.ok(tree.tick <= before + 4, "the timer stops within one tick of the end");
+	// Only the hold timer is left; it goes when the hold ends.
+	assert.equal(io.pending(), idle + 1);
+	io.advance(HOLD_MS);
+	assert.equal(io.pending(), idle);
+});
+
+test("a failed read of a missing file marks the nearest folder as failed", async () => {
+	const { tree } = await make(base());
+	tree.toolStart("c1", "read", { path: "src/deep/nope.ts" });
+	await settle();
+	assert.deepEqual(stateOf(tree), { "/r/src/deep": "running:read" });
+	tree.toolEnd("c1", true, "ENOENT");
+	await settle();
+	assert.deepEqual(stateOf(tree), { "/r/src/deep": "recent:read:error" });
+});
+
+test("a write to a new file runs on its folder, then holds on the file once it exists", async () => {
+	const w = base();
+	const { tree } = await make(w);
+	tree.toolStart("c1", "write", { path: "src/new.ts", content: "x" });
+	await settle();
+	assert.deepEqual(stateOf(tree), { "/r/src": "running:write" });
+	w.dirs["/r/src"]!.push(["new.ts", "file"]);
+	tree.toolEnd("c1", false, "ok");
+	await settle();
+	assert.deepEqual(stateOf(tree), { "/r/src/new.ts": "recent:write" });
+});
+
+test("a search marks its folder while it runs, and the files it found when it ends", async () => {
+	const w = base();
+	w.files = { "/r/src/deep/c.ts": "x", "/r/src/b.ts": "x" };
+	const { tree } = await make(w);
+	tree.toolStart("g1", "grep", { pattern: "x", path: "src" });
+	await settle();
+	assert.deepEqual(stateOf(tree), { "/r/src": "running:grep" });
+	tree.toolEnd("g1", false, { content: [{ type: "text", text: "deep/c.ts:1: x\nb.ts:1: x\nghost.ts:2: x" }] });
+	await settle();
+	assert.deepEqual(stateOf(tree), {
+		"/r/src": "recent:grep",
+		"/r/src/deep/c.ts": "recent:grep",
+		"/r/src/b.ts": "recent:grep",
+	});
+});
+
+test("a search of the whole tree marks the root", async () => {
+	const { tree } = await make(base());
+	tree.toolStart("f1", "find", { pattern: "*.zig" });
+	await settle();
+	assert.deepEqual(stateOf(tree), { "/r": "running:find" });
+	tree.toolEnd("f1", false, "No files found matching pattern");
+	await settle();
+	assert.deepEqual(stateOf(tree), { "/r": "recent:find" });
+});
+
+test("a bash call marks nothing while it runs, then the files whose git state changed", async () => {
+	const w = base();
+	w.top = "/r";
+	w.status = "## main\0 M a.ts\0";
+	w.numstat = "1\t0\ta.ts\0";
+	w.files = { "/r/a.ts": "x\n", "/r/src/deep/c.ts": "one\n" };
+	const { tree } = await make(w);
+	tree.toolStart("b1", "bash", { command: "sleep 5 && echo x >> src/deep/c.ts" });
+	await settle();
+	assert.deepEqual(stateOf(tree), {});
+	w.status = "## main\0 M a.ts\0 M src/deep/c.ts\0";
+	w.numstat = "1\t0\ta.ts\x001\t0\tsrc/deep/c.ts\0";
+	tree.toolEnd("b1", false, "");
+	await settle();
+	assert.deepEqual(stateOf(tree), { "/r/src/deep/c.ts": "recent:bash" });
+	assert.ok(ids(tree).includes("/r/src/deep/c.ts"));
+});
+
+test("calls outside the tree, unknown tools and an end with no start leave the tree alone", async () => {
+	const { io, tree, changes } = await make(base());
+	const before = changes();
+	const timers = io.pending();
+	tree.toolStart("c1", "read", { path: "/etc/hosts" });
+	tree.toolStart("c2", "web_search", { query: "x" });
+	tree.toolEnd("c1", false, "");
+	tree.toolEnd("ghost", true, "");
+	await settle();
+	assert.deepEqual(stateOf(tree), {});
+	assert.equal(changes(), before);
+	assert.equal(io.pending(), timers);
+});
+
+test("a new session drops running calls and holds", async () => {
+	const w = base();
+	w.dirs["/other"] = [["z.ts", "file"]];
+	const { io, tree } = await make(w);
+	tree.toolStart("c1", "read", { path: "a.ts" });
+	tree.toolStart("c2", "read", { path: "src/b.ts" });
+	tree.toolEnd("c2", false, "");
+	await settle();
+	await tree.start("/other");
+	assert.deepEqual(stateOf(tree), {});
+	tree.toolEnd("c1", false, "");
+	assert.deepEqual(stateOf(tree), {});
+	tree.stop();
+	assert.equal(io.pending(), 0);
 });

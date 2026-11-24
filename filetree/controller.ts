@@ -3,10 +3,13 @@
  * scroll position. It reaches the world only through a TreeIo.
  */
 
-import { createGitWatch, createRefresher, type GitState, NO_GIT } from "./git.ts";
-import type { TreeIo } from "./io.ts";
+import { Activity, type PathMark, resultFiles, resultText, toolTargets } from "./activity.ts";
+import { changedBetween, createGitWatch, createRefresher, type GitState, NO_GIT } from "./git.ts";
+import type { Timer, TreeIo } from "./io.ts";
 import { type Entry, type FileNode, replaceChildren, type Row, toNodes, visibleRows } from "./model.ts";
-import { ancestorsOf, inside, join, prunedUnder } from "./paths.ts";
+import { ancestorsOf, dirname, inside, join, prunedUnder } from "./paths.ts";
+import type { RowMark } from "./rows.ts";
+import { TICK_MS } from "./timing.ts";
 import { scrolledBy } from "./viewport.ts";
 
 /** Entries listed per folder; the rest show as one "… N more" row. */
@@ -30,6 +33,19 @@ export class TreeController {
 	git: GitState = NO_GIT;
 	/** First drawn row. */
 	from = 0;
+	/** Animation frame counter; it advances only while a row is running. */
+	tick = 0;
+
+	private readonly activity = new Activity();
+	/** The session directory tool paths resolve against. */
+	private cwd = "";
+	/** The changed files git reported before each running bash call. */
+	private readonly bashBefore = new Map<string, Record<string, string>>();
+	private ticker: Timer | null = null;
+	private expiry: Timer | null = null;
+	private marksAt = "";
+	private marksCache = new Map<string, PathMark>();
+	private activityVersion = 0;
 
 	private rootMore = 0;
 	private rootLoaded = false;
@@ -46,8 +62,8 @@ export class TreeController {
 	private ignoredSet = new Set<string>();
 	private untrackedSet = new Set<string>();
 
-	protected readonly io: TreeIo;
-	protected readonly host: ControllerHost;
+	private readonly io: TreeIo;
+	private readonly host: ControllerHost;
 
 	constructor(io: TreeIo, host: ControllerHost) {
 		this.io = io;
@@ -65,6 +81,7 @@ export class TreeController {
 		this.reset();
 		const mine = this.gen;
 		this.root = cwd.replace(/\\/g, "/").replace(/(.)\/+$/, "$1");
+		this.cwd = this.root;
 		await this.loadDirs([this.root]);
 		if (mine !== this.gen) return;
 		this.host.changed();
@@ -77,9 +94,17 @@ export class TreeController {
 		this.reset();
 	}
 
-	protected reset(): void {
+	private reset(): void {
 		this.gen += 1;
 		this.watch.stop();
+		this.ticker?.cancel();
+		this.ticker = null;
+		this.expiry?.cancel();
+		this.expiry = null;
+		this.activity.clear();
+		this.bashBefore.clear();
+		this.activityVersion += 1;
+		this.tick = 0;
 		this.root = "";
 		this.nodes = [];
 		this.expanded = new Set();
@@ -95,7 +120,7 @@ export class TreeController {
 	}
 
 	/** Mark the rows stale. */
-	protected touch(): void {
+	private touch(): void {
 		this.version += 1;
 	}
 
@@ -185,7 +210,7 @@ export class TreeController {
 
 	/** List `dirs` and put their entries in the tree. A listing that a newer
 	 * one of the same folder overtook is dropped. */
-	protected async loadDirs(dirs: string[]): Promise<void> {
+	private async loadDirs(dirs: string[]): Promise<void> {
 		const mine = this.gen;
 		const seq = ++this.listSeq;
 		for (const dir of dirs) this.listLatest.set(dir, seq);
@@ -212,7 +237,7 @@ export class TreeController {
 	}
 
 	/** Whether the tree lists `dir` on its own (a pruned folder only lists on a click). */
-	protected listable(dir: string): boolean {
+	private listable(dir: string): boolean {
 		return !prunedUnder(this.root, this.io.home, dir);
 	}
 
@@ -256,12 +281,161 @@ export class TreeController {
 
 	private idsAt = -1;
 	private idsCache = new Set<string>();
-	protected nodeIds(): Set<string> {
+	private nodeIds(): Set<string> {
 		if (this.idsAt !== this.version) {
 			this.idsCache = new Set(this.nodes.map((n) => n.id));
 			this.idsAt = this.version;
 		}
 		return this.idsCache;
+	}
+
+	// ─── tool calls ──────────────────────────────────────────────────────────
+
+	/** A tool call started: the rows it names run until toolEnd. */
+	toolStart(id: string, tool: string, args: unknown): void {
+		if (!this.root) return;
+		const target = toolTargets(tool, args, this.cwd, this.root, this.io.home);
+		if (!target) return;
+		this.activity.start(id, tool, target.kind, target.paths);
+		if (target.kind === "bash") {
+			this.bashBefore.set(id, this.git.files);
+			return;
+		}
+		this.activityChanged();
+		void this.show(target.paths);
+	}
+
+	/** A tool call ended, in success or failure. An end with no start is ignored. */
+	toolEnd(id: string, isError: boolean, result: unknown): void {
+		const call = this.activity.end(id, isError, this.io.clock.now());
+		if (!call) return;
+		this.activityChanged();
+		void this.settle(call.id, call.tool, call.kind, call.paths, isError, result).catch(() => undefined);
+	}
+
+	/** What follows a call's end: read the disk and git again, and mark what
+	 * the call changed or found. */
+	private async settle(
+		id: string,
+		tool: string,
+		kind: RowMark["kind"],
+		paths: string[],
+		isError: boolean,
+		result: unknown,
+	): Promise<void> {
+		const mine = this.gen;
+		if (kind === "bash") {
+			const before = this.bashBefore.get(id);
+			this.bashBefore.delete(id);
+			await this.sync();
+			if (mine !== this.gen || !before || !this.git.top) return;
+			const changed = changedBetween(before, this.git.files);
+			// A call that is still running sees this call's changes as already there.
+			for (const key of this.bashBefore.keys()) this.bashBefore.set(key, this.git.files);
+			if (changed.length === 0) return;
+			this.activity.mark(changed, "bash", "bash", this.io.clock.now());
+			await this.show(changed);
+			return;
+		}
+		const builtinRead = kind === "read" && ["read", "grep", "find", "ls"].includes(tool.trim().toLowerCase());
+		if (!builtinRead) {
+			// The folder of a written file is listed again even while closed,
+			// so a new file gets its row.
+			await this.sync(paths.map((path) => dirname(path)));
+			if (mine !== this.gen) return;
+			this.activityChanged();
+			await this.show(paths);
+			return;
+		}
+		if (isError) return;
+		const rels = resultFiles(tool, resultText(result));
+		const base = paths[0];
+		if (rels.length === 0 || !base) return;
+		const found: string[] = [];
+		try {
+			const searched = await this.io.fs.stat(base);
+			for (const rel of searched.kind === "dir" ? rels.map((r) => join(base, r)) : [base]) {
+				if (!inside(this.root, rel)) continue;
+				await this.io.fs.stat(rel).then(
+					() => found.push(rel),
+					() => undefined,
+				);
+			}
+		} catch {
+			return;
+		}
+		if (mine !== this.gen || found.length === 0) return;
+		this.activity.mark(found, "read", tool, this.io.clock.now());
+		await this.show(found);
+	}
+
+	/** List what is needed for `paths` to have rows, then draw. */
+	private async show(paths: string[]): Promise<void> {
+		const mine = this.gen;
+		await this.reveal(paths);
+		if (mine !== this.gen) return;
+		this.activityChanged();
+	}
+
+	/** The activity or the rows it lands on changed: open the folders above
+	 * the marked rows, keep the timers in step, and draw. */
+	private activityChanged(): void {
+		this.activityVersion += 1;
+		const now = this.io.clock.now();
+		for (const id of this.marks().keys()) {
+			for (const dir of ancestorsOf(id, this.root)) {
+				if (this.expanded.has(dir)) continue;
+				this.expanded.add(dir);
+				this.touch();
+			}
+		}
+		if (this.activity.hasRunning() && !this.ticker) {
+			this.ticker = this.io.clock.every(TICK_MS, () => {
+				if (!this.activity.hasRunning()) {
+					this.ticker?.cancel();
+					this.ticker = null;
+					return;
+				}
+				this.tick += 1;
+				this.host.changed();
+			});
+		}
+		this.expiry?.cancel();
+		this.expiry = null;
+		const next = this.activity.nextExpiry();
+		if (next !== undefined) {
+			this.expiry = this.io.clock.after(Math.max(1, next - now), () => {
+				this.expiry = null;
+				this.activity.expire(this.io.clock.now());
+				this.activityChanged();
+			});
+		}
+		this.host.changed();
+	}
+
+	/** The live state of each marked row, by row id (the root's id for the
+	 * root itself). Several paths on one row give the row its running state
+	 * first, then the newest mark. */
+	marks(): Map<string, PathMark> {
+		const key = `${this.version}:${this.activityVersion}`;
+		if (key === this.marksAt) return this.marksCache;
+		const out = new Map<string, PathMark>();
+		for (const m of this.activity.marks(this.io.clock.now())) {
+			const id = m.path === this.root ? this.root : this.rowIdOf(m.path);
+			if (!id) continue;
+			const cur = out.get(id);
+			if (cur && cur.state === "running" && m.state !== "running") continue;
+			out.set(id, m);
+		}
+		this.marksAt = key;
+		this.marksCache = out;
+		return out;
+	}
+
+	/** Read git again before a prompt runs, so the state a bash call is
+	 * compared against is current. */
+	promptStart(): void {
+		void this.refreshGit().catch(() => undefined);
 	}
 
 	async refreshGit(): Promise<void> {
@@ -272,24 +446,20 @@ export class TreeController {
 		if (mine !== this.gen) return;
 		const sig = JSON.stringify(state);
 		if (sig === this.gitSig) return;
-		const before = this.git;
 		this.gitSig = sig;
 		this.git = state;
 		this.ignoredSet = new Set(state.ignored);
 		this.untrackedSet = new Set(state.untrackedDirs);
-		this.gitChanged(before, state);
 		this.host.changed();
 	}
 
-	/** A git read differed from the one before it. */
-	protected gitChanged(_before: GitState, _after: GitState): void {}
-
 	/** List the root and the open folders again and read git again. */
-	async sync(): Promise<void> {
+	async sync(also: string[] = []): Promise<void> {
 		const mine = this.gen;
 		if (!this.root) return;
+		const extra = new Set(also);
 		const open = this.nodes
-			.filter((n) => n.kind === "dir" && n.loaded && this.expanded.has(n.id))
+			.filter((n) => n.kind === "dir" && n.loaded && (this.expanded.has(n.id) || extra.has(n.id)))
 			.map((n) => n.id);
 		const sigOf = () => this.nodes.map((n) => `${n.id}:${n.kind}:${n.more ?? 0}`).sort().join("\n");
 		const before = sigOf();
