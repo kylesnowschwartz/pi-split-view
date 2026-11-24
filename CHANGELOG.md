@@ -18,6 +18,17 @@ Notable changes to `pi-split-view`. Versioning is [SemVer](https://semver.org/).
   other extensions draw in the transcript (markdown transformers, custom entries, custom
   messages) then renders and takes mouse input. The default, `messages`, is unchanged.
 
+- File tree pane: a right column that shows the session's working directory with git
+  status colors and letters and `+N -N` line changes against HEAD. A row animates while
+  a tool call that names it runs, with the call's Tool Usage icon and color, then holds
+  a steady tone for 12 seconds (red when the call failed). Files a `bash` call changed
+  are marked when it ends. The folders above touched files open at once; other folders
+  close only when the touched rows need the room, at most once every 2 seconds, and
+  never above a running or held row. A click selects a file, and the next prompt tells
+  the model which file is selected. `/split-tree` toggles the pane, its left border
+  drags to resize it, and `/split-save` stores it under the `tree: { open, width }`
+  config key. The tree logic is adapted from data-goblin/claude-code-filetree (MIT).
+
 ### Changed
 
 - The drawers view is the only layout. It is on at startup unless pi runs with

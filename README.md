@@ -64,12 +64,45 @@ The Thinking drawer above is collapsed to its one-row bar; the Tool Usage drawer
   `/split-response-source transcript` it draws pi's own transcript minus tool calls
   instead, so what other extensions draw there (markdown transformers, custom entries,
   custom messages) renders and takes clicks.
+- **File tree pane** — a right column at full height shows the session's working
+  directory as a tree, with the drawers view to its left. Folders list on first open;
+  `.git` is left out, and `node_modules`, `target`, `.venv`, `__pycache__`, `dist` and
+  `.next` open only on a click. Files and closed folders carry their git status letter
+  and color and their `+N -N` line changes against HEAD. Rows follow the agent's tool
+  calls (legend below): the folders above a touched file open at once and the pane
+  scrolls to a running row that is off screen. A folder above a running or held row
+  never closes. Other folders close only when the touched rows need the room, at most
+  once every 2 seconds. Touched rows that still do not fit are counted in the header
+  (`↑2 ↓1`). A click selects a file; the bottom border names it, and the next prompt
+  tells the model which file is selected, without changing the prompt text. The pane
+  hides when the terminal is narrower than 100 columns, and a zoomed drawer leaves it
+  in place.
 - **One layout layer** — the extension composes one layer around pi's own transcript and
   editor dock, which it reuses verbatim, so input is untouched. Panels cache their
   rendered rows, theme changes recompose, and the layout is in place before the first
   paint.
 
-The drawers need pi's fullscreen mode (`"tuiMode": "fullscreen"` in settings, or
+File tree row states:
+
+| Row | Meaning |
+| --- | --- |
+| tool icon, name with a moving bright band | a tool call that names the row is running; it lasts from the call's start to its end, with the icon and color of the call's Tool Usage card |
+| name in a steady blue | a `read`, `grep`, `find` or `ls` call touched the row in the last 12 seconds |
+| name in a steady peach | an `edit` or `write` call touched the row in the last 12 seconds |
+| name in a steady green | a `bash` call that ended in the last 12 seconds changed the file (its git status, line counts or modification time differ from before the call) |
+| `✗`, name in the error color | the call that touched the row in the last 12 seconds failed |
+| name in the warning, success, error or accent color; letter at the right | git status: modified (`M`, `T`), new (`A`, `?`), deleted or unmerged (`D`, `U`), renamed or copied (`R`, `C`) |
+| dim name | ignored by git |
+
+A search (`grep`, `find`, `ls`) marks the folder it searches; when it ends, `grep` and
+`find` also mark up to 12 files they found. A search of the whole working directory
+marks the root name in the header. A call on a file that has no row (a new file, a
+missing file, a file in a pruned folder) marks the nearest folder above it that has
+one, or the root name. A `bash`
+call marks nothing while it runs. Calls on paths outside the working directory, and
+tools with no path argument, are not shown.
+
+The drawers and the file tree need pi's fullscreen mode (`"tuiMode": "fullscreen"` in settings, or
 `--tui-mode fullscreen`).
 
 ## Mouse
@@ -85,12 +118,18 @@ The drawers need pi's fullscreen mode (`"tuiMode": "fullscreen"` in settings, or
 | `[▶]` / `[◼]` on the open Tool Usage bottom frame | pin the drawer to the raw live output of the newest streaming tool / back to all tools |
 | a tool card or thinking card header | expand or collapse the card |
 | wheel over an open drawer (frame included) | scroll that drawer |
+| a folder in the file tree | open or close the folder |
+| a file in the file tree | select the file; a click on the selected file clears the selection |
+| the file name in the file tree's bottom border | clear the selection |
+| the file tree's left border | drag to resize the pane (24–80 columns) |
+| wheel over the file tree | scroll the tree; it follows the agent again when the next tool call starts |
 
 ## Commands
 
 | Command | Effect |
 | --- | --- |
 | `/split` | toggle the drawers view: off = bare pi layout, on = drawers with the saved drawer state |
+| `/split-tree` | show or hide the file tree pane |
 | `/split-thinking` | open or close the Thinking drawer |
 | `/split-tools` | open or close the Tool Usage drawer |
 | `/split-drawer <thinking\|tools>` | open or close the named drawer |
@@ -104,10 +143,10 @@ The drawers need pi's fullscreen mode (`"tuiMode": "fullscreen"` in settings, or
 | `/split-trim-response [on\|off]` | Messages: full transcript ↔ response-only view |
 | `/split-response-source [messages\|transcript]` | response-only content: `messages` = user + assistant text (default), `transcript` = pi's transcript minus tool calls, with other extensions' rendering |
 | `/split-divider [rule\|space]` | response-only separator between successive answers: `rule` = dim dashed line (default), `space` = blank line |
-| `/split-save` | store the current options and drawer state as startup defaults for new windows |
+| `/split-save` | store the current options, drawer state and file tree state as startup defaults for new windows |
 
 Start pi with `--no-split` to begin with the bare pi layout; `/split` then turns the
-drawers on.
+drawers and the file tree on.
 
 Commands change the current window only, so concurrent windows do not overwrite each
 other. Only `/split-save` writes the config file.
@@ -128,6 +167,7 @@ wrongly typed value falls back to its default, and keys not listed here are igno
 | `thinkingMode` | `"compact"` \| `"full"` | `"compact"` |
 | `thinkingHudMode` | `"ai"` \| `"local"` \| `"off"` | `"ai"` |
 | `drawers` | `{ thinking: { open, height }, tools: { open, height } }` | closed; 10 and 14 rows |
+| `tree` | `{ open, width }` | shown; 36 columns |
 
 ```json
 {
@@ -136,13 +176,17 @@ wrongly typed value falls back to its default, and keys not listed here are igno
   "drawers": {
     "thinking": { "open": false, "height": 10 },
     "tools": { "open": true, "height": 14 }
-  }
+  },
+  "tree": { "open": true, "width": 36 }
 }
 ```
 
 `height` is the open drawer's height in rows, frame included (5–30). Both drawers start
 collapsed when a session starts; the saved heights apply from the start, and the saved
 `open` state applies when `/split` turns the drawers on.
+
+`tree.width` is the file tree pane's width in columns, frame included (24–80). The pane
+gets narrower than that when the rest of the layout would drop below 76 columns.
 
 ## Install
 
@@ -188,11 +232,22 @@ See [CHANGELOG.md](CHANGELOG.md).
 - `layout-drawers.ts` — the drawers layout: drawer state, bars, geometry, drag-resize
 - `layout-types.ts` — types shared by the two files above
 - `layout-manager.ts` — single-layer layout ownership around pi's base root
+- `filetree/` — the file tree pane: tree model, listing, git, tool-call activity, fold
+  and scroll rules, rows and the pane component; `index.ts` is its one entry
 - `ui-panels-config.ts` — validated startup-default config (`~/.pi/agent/ui-panels.json`)
 - `thinking-hud.ts` — semantic highlighting of thinking text
 - `tool-highlighter.ts` — syntax highlighting of tool commands, code and output
 - `helpers.ts` — pure helpers (truncation, caps, durations, turn spans, drawer geometry)
-- `test/` — unit tests for the helpers, the config, the HUD and the highlighter
+- `test/` — unit tests for the helpers, the config, the HUD, the highlighter and the
+  file tree
+
+## Acknowledgements
+
+The file tree's logic (tree model, path helpers, prune list, git status and numstat
+parsing, listing, icon map) is adapted from
+[data-goblin/claude-code-filetree](https://github.com/data-goblin/claude-code-filetree),
+MIT, Copyright (c) 2026 Kurt Buhler. Its license notice is in
+[filetree/LICENSE](filetree/LICENSE).
 
 ## License
 
