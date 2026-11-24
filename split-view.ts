@@ -155,14 +155,11 @@ import {
 	capToolText,
 	formatDuration,
 	formatToolArgSummary,
-	headTailPreview,
-	isCappedToolText,
 	isInternalNotificationText,
 	isToolExpanded,
 	keepsInResponseOnly,
 	lastImageBlock,
 	liveTailLines,
-	outputPreview,
 	pickThinkingHeadline,
 	pickThinkingSummary,
 	selectActiveTurns,
@@ -768,11 +765,6 @@ interface ToolEntry {
 	/** The tool reported at least one partial result (tool_execution_update),
 	 * i.e. it streams output via onUpdate while running. */
 	streaming?: boolean;
-	/** The true first output line, captured the first time output was seen —
-	 * `output` itself keeps only the last MAX_TOOL_OUTPUT_LINES, so without
-	 * this the band's head+tail preview could not show the real first line.
-	 * null = unknown (the first text seen was already capped). */
-	firstLine?: string | null;
 	/** Non-blank lines in the last output text (the stored window is only the
 	 * last MAX_TOOL_OUTPUT_LINES of them), for an honest "+N more" count. */
 	outputLines?: number;
@@ -879,15 +871,6 @@ function setToolOutput(e: ToolEntry, text: string): void {
 	let nonBlank = 0;
 	for (const l of lines) if (l.trim()) nonBlank++;
 	e.outputLines = nonBlank;
-	// Capture the true first line only once: output accumulates from the start,
-	// so the first write still holds the beginning (later writes are tails) —
-	// unless that first write was already capped: then its first line is the
-	// truncation marker and the real one is unknown.
-	if (e.firstLine === undefined && nonBlank > 0) {
-		e.firstLine = isCappedToolText(capped)
-			? null
-			: lines.find((l) => l.trim().length > 0)!.trim();
-	}
 }
 
 /** SV-17: ingest one tool call through the SAME path for live events and
@@ -943,16 +926,16 @@ function ingestToolResult(id: string, result: any, isError: boolean, endedAt?: n
 	toolsVersionCounter++;
 }
 
-/** One row-source item of a band panel body: a styled text line, or an
+/** One row-source item of a panel body: a styled text line, or an
  * inline image block. Image items render RAW via pi-tui's Image component
  * (never wrapped, capped or padded) — the same line structure pi's own
  * transcript feeds its ScrollView, which the TUI engine handles (image-aware
  * scrollbar, scroll cropping, placement cleanup on full repaints). */
 type BodyItem = string | { image: ImageBlock; maxRows?: number };
 
-/** Band (non-zoomed) tools panel: inline images are thumbnails capped at
- * this many rows so they don't crowd the small panel. Zoomed: pi's default. */
-const BAND_IMAGE_ROWS = 6;
+/** Tool Usage drawer (not zoomed): inline images are thumbnails capped at
+ * this many rows so they don't crowd the drawer. Zoomed: pi's default. */
+const DRAWER_IMAGE_ROWS = 6;
 
 /** Live view: at most this many of the newest raw output lines (below
  * MAX_BODY_ROWS, so wrapped long lines usually still fit the body window). */
@@ -1007,71 +990,6 @@ function liveToolItems(th: Theme, e: ToolEntry, textWidth: number): BodyItem[] {
 	if (hidden > 0) out.push(th.fg("dim", `  … ${hidden} earlier lines`));
 	if (lines.length === 0 && e.active) out.push(th.fg("dim", "  …"));
 	for (const l of lines) out.push(l ? th.fg("toolOutput", `  ${l}`) : "");
-	return out;
-}
-
-function toolItems(theme: Theme, width: number): BodyItem[] {
-	const th = theme;
-	// Text budget inside the frame: 1 col inset + ≥2 trailing pad cols
-	// (the transient scrollbar paints over the pad, never the frame).
-	const textWidth = Math.max(8, width - 3);
-	const live = liveEntry();
-	if (live) return liveToolItems(th, live, textWidth);
-	const out: BodyItem[] = [];
-	// Zooming the tools panel expands it over the whole area above the editor,
-	// so it always renders full detail regardless of the compact/full toggle.
-	const zoomedTools = zoomed === "tools";
-	const full = toolMode === "full" || zoomedTools;
-	for (const id of toolOrder) {
-		const e = toolsBy.get(id);
-		if (!e) continue;
-		out.push(toolHeaderRow(th, e, textWidth));
-		if (!full) {
-			if (out.length > 1) out.splice(out.length - 1, 0, "");
-			continue;
-		}
-		const content = (e.output || "")
-			.split(/\r?\n/)
-			.map((l) => l.trim())
-			.filter(Boolean);
-		if (content.length === 0) {
-			if (e.active) out.push(th.fg("dim", "  · …"));
-		} else if (zoomedTools) {
-			// Zoomed: the whole stored output (≤ MAX_TOOL_OUTPUT_LINES).
-			const { shown, hidden } = outputPreview(content, MAX_TOOL_OUTPUT_LINES);
-			for (const l of shown)
-				out.push(th.fg("toolOutput", `  · ${truncateInline(l, textWidth - 4)}`));
-			if (hidden > 0) out.push(th.fg("dim", `  · +${hidden} more`));
-		} else {
-			// Band full detail: head+tail preview — the output's true first line
-			// (e.firstLine, kept from when output was first seen), "+N more",
-			// last 2 lines — so a running tool's fresh tail stays visible (pi's
-			// own transcript previews with keep:"end" for the same reason).
-			const { head, hidden, tail } = headTailPreview(content, 1, 2, e.outputLines);
-			if (hidden > 0 && e.firstLine) head[0] = e.firstLine;
-			const row = (l: string, dim = false) =>
-				out.push(th.fg(dim ? "dim" : "toolOutput", `  · ${truncateInline(l, textWidth - 4)}`));
-			for (const l of head) row(l);
-			if (hidden > 0) row(`+${hidden} more`, true);
-			for (const l of tail) row(l);
-		}
-		// Zoomed: an edit's diff, rendered like pi's transcript (renderDiff
-		// colours +/- lines); long lines wrap in the body.
-		if (zoomedTools && e.diff) {
-			out.push("");
-			for (const l of renderDiff(e.diff).split(/\r?\n/)) out.push(`    ${l}`);
-		}
-		// Inline image result (e.g. read on an image file), like pi's
-		// transcript: a separator row, then the image as a raw item. Without
-		// image support it's a one-line text fallback styled as an output row.
-		if (e.image) {
-			if (getCapabilities().images) out.push("");
-			out.push({
-				image: e.image,
-				maxRows: zoomedTools ? undefined : BAND_IMAGE_ROWS,
-			});
-		}
-	}
 	return out;
 }
 
@@ -1505,7 +1423,7 @@ class RecentBody implements Component {
 		private minRows: () => number,
 		private ctl?: PanelCtl,
 		/** SV-27: false = emit every row of the source instead of the newest
-		 * MAX_BODY_ROWS window. See BandDef.windowed. */
+		 * MAX_BODY_ROWS window. See PanelDef.windowed. */
 		private windowed = true,
 	) {}
 	render(width: number): string[] {
@@ -2586,7 +2504,7 @@ class RichToolsBody implements Component {
 			this.emitImage(
 				entry.image,
 				width,
-				zoomedTools ? undefined : BAND_IMAGE_ROWS,
+				zoomedTools ? undefined : DRAWER_IMAGE_ROWS,
 				emitLine,
 				rows,
 			);
@@ -2688,10 +2606,12 @@ class RichToolsBody implements Component {
 
 // ─── layout composition (one layer) ──────────────────────────────────────────
 
-interface BandDef {
+interface PanelDef {
 	title: string;
 	color: "accent" | "muted";
 	streaming: () => boolean;
+	/** Line style and row source of the Thinking body's full-prose mode (the
+	 * Tool Usage body draws its own cards). */
 	style: (line: string) => string;
 	lines: (width: number) => BodyItem[];
 	version: () => number;
@@ -2717,7 +2637,7 @@ function thinkingHudPalette(theme: Theme): ThinkingHudPalette {
 	};
 }
 
-function bandDef(theme: Theme, id: "thinking" | "tools"): BandDef {
+function panelDef(theme: Theme, id: "thinking" | "tools"): PanelDef {
 	if (id === "thinking") {
 		const palette = thinkingHudPalette(theme);
 		return {
@@ -2747,7 +2667,7 @@ function bandDef(theme: Theme, id: "thinking" | "tools"): BandDef {
 		color: "muted",
 		streaming: () => toolOrder.some((id) => toolsBy.get(id)?.active),
 		style: (l) => l,
-		lines: (w) => toolItems(theme, w),
+		lines: () => [],
 		version: toolsVersion,
 		empty: "No tools called yet",
 	};
@@ -2761,7 +2681,7 @@ function bandDef(theme: Theme, id: "thinking" | "tools"): BandDef {
  * second composite layer. The MeasurementSafeVStack wrapper keeps the
  * engine's discarded measurement passes O(1).
  */
-function framedPanel(theme: Theme, d: BandDef, ctl: PanelCtl): Component {
+function framedPanel(theme: Theme, d: PanelDef, ctl: PanelCtl): Component {
 	// Filler rows track the real viewport, so the left edge stays continuous
 	// at any allocated height.
 	const minRows = () => ctl.scroll?.viewportHeight || ctl.minRows?.() || 1;
@@ -2827,7 +2747,7 @@ function buildZoom(theme: Theme, id: PanelId): Component | null {
 					2,
 			),
 	};
-	const panel = framedPanel(theme, bandDef(theme, id), ctl);
+	const panel = framedPanel(theme, panelDef(theme, id), ctl);
 	return new VStack([
 		{ component: panel, basis: 0, grow: 1, shrink: 1, minSize: 1 },
 		{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
@@ -3053,7 +2973,7 @@ function buildBodyScrollPair(
 	id: "thinking" | "tools",
 	ctl: PanelCtl,
 ): { scroll: ScrollView; bottom: Component; reattach: () => void } {
-	const d = bandDef(theme, id);
+	const d = panelDef(theme, id);
 	const minRows = () => ctl.scroll?.viewportHeight || ctl.minRows?.() || 1;
 	const body: Component =
 		id === "tools"

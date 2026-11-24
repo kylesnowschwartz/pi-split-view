@@ -122,46 +122,6 @@ export function lastImageBlock(content: unknown): ImageBlock | undefined {
 	return undefined;
 }
 
-/** The first `cap` lines of an already-trimmed output list, plus how many
- * lines were hidden (for the "+N more" marker). `cap <= 0` shows nothing. */
-export function outputPreview(
-	lines: string[],
-	cap: number,
-): { shown: string[]; hidden: number } {
-	if (cap <= 0 || lines.length === 0) return { shown: [], hidden: lines.length };
-	const shown = lines.slice(0, cap);
-	return { shown, hidden: lines.length - shown.length };
-}
-
-/** Head+tail preview: the first `head` lines, a hidden count, and the last
- * `tail` lines, so a running command's fresh tail stays visible while the
- * start of the output is not lost. When everything fits, `head` is the whole
- * list and `tail` is empty (no line is duplicated). `total` is the real line
- * count when `lines` is only a stored window of a longer output (defaults to
- * `lines.length`), so `hidden` counts what is really not shown. The caller
- * renders the "+N more" marker between `head` and `tail`. */
-export function headTailPreview(
-	lines: string[],
-	head: number,
-	tail: number,
-	total = lines.length,
-): { head: string[]; hidden: number; tail: string[] } {
-	total = Math.max(total, lines.length);
-	if (lines.length <= head + tail)
-		return { head: lines.slice(), hidden: total - lines.length, tail: [] };
-	return {
-		head: lines.slice(0, head),
-		hidden: total - head - tail,
-		tail: lines.slice(lines.length - tail),
-	};
-}
-
-/** True if `s` was cut by capToolText (it starts with the truncation marker),
- * i.e. its first line is the marker, not the output's real first line. */
-export function isCappedToolText(s: string): boolean {
-	return s.startsWith("[truncated: newest ");
-}
-
 /** Live-output view of a streaming tool: the last `max` lines of its raw
  * output, shaped for a terminal-like panel. Unlike the trimmed previews it
  * keeps indentation and blank lines; it drops escape sequences and control
