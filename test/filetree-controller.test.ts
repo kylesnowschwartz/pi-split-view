@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MAX_DIR_ENTRIES, TreeController } from "../filetree/controller.ts";
-import { HOLD_MS, TICK_MS } from "../filetree/timing.ts";
+import { CLOSE_INTERVAL_MS, HOLD_MS, TICK_MS } from "../filetree/timing.ts";
 import { fakeIo, settle, type World } from "./filetree-world.ts";
 
 const base = (): World => ({
@@ -321,4 +321,121 @@ test("a new session drops running calls and holds", async () => {
 	assert.deepEqual(stateOf(tree), {});
 	tree.stop();
 	assert.equal(io.pending(), 0);
+});
+
+// ─── fold and follow ────────────────────────────────────────────────────────
+
+/** A root with `n` folders (d00, d01, …), each with a `sub` folder of 6 files and 6 files of its own. */
+function wide(n: number): World {
+	const w: World = { dirs: { "/r": [] } };
+	for (let d = 0; d < n; d++) {
+		const name = `d${String(d).padStart(2, "0")}`;
+		w.dirs["/r"]!.push([name, "dir"]);
+		w.dirs[`/r/${name}`] = [["sub", "dir"], ...Array.from({ length: 6 }, (_, f) => [`f${f}.ts`, "file"] as [string, "file"])];
+		w.dirs[`/r/${name}/sub`] = Array.from({ length: 6 }, (_, f) => [`s${f}.ts`, "file"] as [string, "file"]);
+	}
+	return w;
+}
+
+const shown = (tree: TreeController, room: number) => tree.window(room).rows.map((r) => r.node.id);
+
+test("follow: the window moves to a running row that is off screen, and stays put for one that is drawn", async () => {
+	const { tree } = await make(wide(30));
+	assert.equal(tree.window(10).from, 0);
+	tree.toolStart("c1", "read", { path: "d20/sub/s3.ts" });
+	await settle();
+	assert.ok(shown(tree, 10).includes("/r/d20/sub/s3.ts"));
+	const from = tree.window(10).from;
+	tree.toolStart("c2", "read", { path: "d20/sub/s1.ts" });
+	await settle();
+	assert.equal(tree.window(10).from, from, "a row already on screen is not re-centred");
+	tree.toolEnd("c1", false, "");
+	tree.toolEnd("c2", false, "");
+	await settle();
+	assert.equal(tree.window(10).from, from);
+});
+
+test("follow: a wheel turn lets go of the window until the next call starts", async () => {
+	const { tree } = await make(wide(30));
+	tree.window(10);
+	tree.toolStart("c1", "read", { path: "d20/f0.ts" });
+	await settle();
+	tree.window(10);
+	tree.wheel(-30);
+	assert.equal(tree.window(10).from, 0);
+	assert.deepEqual([tree.window(10).above, tree.window(10).below], [0, 1]);
+	tree.toolStart("c2", "read", { path: "d25/f0.ts" });
+	await settle();
+	assert.ok(shown(tree, 10).includes("/r/d25/f0.ts"));
+});
+
+test("three quick reads in far-apart folders: no folder above a touched file closes before its hold ends", async () => {
+	const { io, tree } = await make(wide(30));
+	tree.window(8);
+	const files = ["/r/d02/sub/s1.ts", "/r/d15/sub/s2.ts", "/r/d28/sub/s3.ts"];
+	const endedAt: number[] = [];
+	for (const [i, path] of files.entries()) {
+		tree.toolStart(`c${i}`, "read", { path });
+		await settle();
+		io.advance(20);
+		tree.toolEnd(`c${i}`, false, "");
+		endedAt.push(io.clock.now());
+		await settle();
+		io.advance(600);
+	}
+	// Sample every 500 ms until the last hold has ended.
+	for (let t = 0; t <= 15_000; t += 500) {
+		const now = io.clock.now();
+		tree.window(8);
+		for (const [i, path] of files.entries()) {
+			if (now >= endedAt[i]! + HOLD_MS) continue;
+			assert.ok(ids(tree).includes(path), `${path} is listed ${now - endedAt[i]!} ms after its call ended`);
+			assert.equal(tree.marks().get(path)?.state, "recent");
+		}
+		io.advance(500);
+		await settle();
+	}
+	// The holds are over and no new call came: the folders are still open.
+	assert.deepEqual(stateOf(tree), {});
+	for (const path of files) assert.ok(ids(tree).includes(path));
+});
+
+test("held rows that cannot fit are counted above and below the window", async () => {
+	const { io, tree } = await make(wide(30));
+	tree.window(8);
+	for (const [i, path] of ["d02/sub/s1.ts", "d15/sub/s2.ts", "d28/sub/s3.ts"].entries()) {
+		tree.toolStart(`c${i}`, "read", { path });
+		await settle();
+		tree.toolEnd(`c${i}`, false, "");
+		await settle();
+		io.advance(100);
+	}
+	const win = tree.window(8);
+	assert.ok(win.rows.some((r) => r.node.id === "/r/d28/sub/s3.ts"));
+	assert.deepEqual([win.above, win.below], [2, 0]);
+});
+
+test("folders opened by hand close only when marked rows need the room, and only once per interval", async () => {
+	const { io, tree } = await make(wide(30));
+	tree.window(12);
+	tree.toggleDir("/r/d05");
+	tree.toggleDir("/r/d06");
+	await settle();
+	// One read: it fits alone, the hand-opened folders stay.
+	tree.toolStart("c1", "read", { path: "d04/f5.ts" });
+	await settle();
+	assert.ok(tree.expanded.has("/r/d05") && tree.expanded.has("/r/d06"));
+	// A second read on the far side of them: both rows now need the room.
+	tree.toolStart("c2", "read", { path: "d07/f0.ts" });
+	await settle();
+	assert.ok(!tree.expanded.has("/r/d05") && !tree.expanded.has("/r/d06"));
+	assert.ok(tree.expanded.has("/r/d04") && tree.expanded.has("/r/d07"));
+	// Opened again by hand, then new activity inside the interval: the close waits.
+	tree.toggleDir("/r/d05");
+	io.advance(500);
+	tree.toolStart("c3", "read", { path: "d07/f1.ts" });
+	await settle();
+	assert.ok(tree.expanded.has("/r/d05"), "no second close pass inside the interval");
+	io.advance(CLOSE_INTERVAL_MS);
+	assert.ok(!tree.expanded.has("/r/d05"), "the paced close runs when the interval ends");
 });

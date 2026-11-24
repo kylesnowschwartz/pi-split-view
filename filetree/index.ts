@@ -185,8 +185,8 @@ export class FileTree {
 			lines: win.rows.map((r) => renderRow(r, ctx)),
 			from: win.from,
 			total: win.total,
-			above: 0,
-			below: 0,
+			above: win.above,
+			below: win.below,
 		};
 	}
 

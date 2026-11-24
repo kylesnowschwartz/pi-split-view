@@ -4,6 +4,7 @@
  */
 
 import { Activity, type PathMark, resultFiles, resultText, toolTargets } from "./activity.ts";
+import { foldFor, offscreen, scrollFor } from "./fold.ts";
 import { changedBetween, createGitWatch, createRefresher, type GitState, NO_GIT } from "./git.ts";
 import type { Timer, TreeIo } from "./io.ts";
 import { type Entry, type FileNode, replaceChildren, type Row, toNodes, visibleRows } from "./model.ts";
@@ -46,6 +47,10 @@ export class TreeController {
 	private marksAt = "";
 	private marksCache = new Map<string, PathMark>();
 	private activityVersion = 0;
+	/** The window follows the marked rows; a wheel turn lets go until the next call. */
+	private follow = true;
+	private lastCloseAt = Number.NEGATIVE_INFINITY;
+	private closeRetry: Timer | null = null;
 
 	private rootMore = 0;
 	private rootLoaded = false;
@@ -101,6 +106,10 @@ export class TreeController {
 		this.ticker = null;
 		this.expiry?.cancel();
 		this.expiry = null;
+		this.closeRetry?.cancel();
+		this.closeRetry = null;
+		this.lastCloseAt = Number.NEGATIVE_INFINITY;
+		this.follow = true;
 		this.activity.clear();
 		this.bashBefore.clear();
 		this.activityVersion += 1;
@@ -140,12 +149,52 @@ export class TreeController {
 		return this.rowsCache;
 	}
 
-	/** The rows drawn in a pane with `room` rows. */
-	window(room: number): { rows: Row[]; from: number; total: number } {
-		this.room = Math.max(1, room);
+	/** The rows drawn in a pane with `room` rows, and how many marked rows
+	 * sit above and below them. While the window follows, it moves only to
+	 * bring the newest running row (or, with no call running, the newest held
+	 * row) on screen. */
+	window(room: number): { rows: Row[]; from: number; total: number; above: number; below: number } {
+		const fit = Math.max(1, room);
+		if (fit !== this.room) {
+			this.room = fit;
+			this.refold();
+		}
 		const all = this.rows();
-		this.from = scrolledBy(this.from, 0, all.length, this.room);
-		return { rows: all.slice(this.from, this.from + this.room), from: this.from, total: all.length };
+		const marks = this.marks();
+		const running: number[] = [];
+		const held: number[] = [];
+		let target = -1;
+		let targetMark: PathMark | undefined;
+		const rank = (m: PathMark) => (m.state === "running" ? 1 : 0);
+		if (marks.size > 0) {
+			all.forEach((r, at) => {
+				const m = marks.get(r.node.id);
+				if (!m) return;
+				(m.state === "running" ? running : held).push(at);
+				const better =
+					!targetMark ||
+					rank(m) > rank(targetMark) ||
+					(rank(m) === rank(targetMark) && m.seq > targetMark.seq);
+				if (better) {
+					target = at;
+					targetMark = m;
+				}
+			});
+		}
+		this.from = scrollFor({
+			from: this.from,
+			room: this.room,
+			total: all.length,
+			target: this.follow ? target : -1,
+			running,
+			held,
+		});
+		return {
+			rows: all.slice(this.from, this.from + this.room),
+			from: this.from,
+			total: all.length,
+			...offscreen(this.from, this.room, [...running, ...held]),
+		};
 	}
 
 	get paneRoom(): number {
@@ -155,6 +204,7 @@ export class TreeController {
 	wheel(delta: number): void {
 		if (!delta) return;
 		const by = Math.sign(delta) * Math.max(3, Math.abs(delta));
+		this.follow = false;
 		this.from = scrolledBy(this.from, by, this.rows().length, this.room);
 		this.host.changed();
 	}
@@ -297,6 +347,7 @@ export class TreeController {
 		const target = toolTargets(tool, args, this.cwd, this.root, this.io.home);
 		if (!target) return;
 		this.activity.start(id, tool, target.kind, target.paths);
+		this.follow = true;
 		if (target.kind === "bash") {
 			this.bashBefore.set(id, this.git.files);
 			return;
@@ -334,6 +385,7 @@ export class TreeController {
 			for (const key of this.bashBefore.keys()) this.bashBefore.set(key, this.git.files);
 			if (changed.length === 0) return;
 			this.activity.mark(changed, "bash", "bash", this.io.clock.now());
+			this.follow = true;
 			await this.show(changed);
 			return;
 		}
@@ -377,18 +429,12 @@ export class TreeController {
 		this.activityChanged();
 	}
 
-	/** The activity or the rows it lands on changed: open the folders above
-	 * the marked rows, keep the timers in step, and draw. */
-	private activityChanged(): void {
+	/** The activity or the rows it lands on changed: apply the fold rule,
+	 * keep the timers in step, and draw. */
+	private activityChanged(fold = true): void {
 		this.activityVersion += 1;
 		const now = this.io.clock.now();
-		for (const id of this.marks().keys()) {
-			for (const dir of ancestorsOf(id, this.root)) {
-				if (this.expanded.has(dir)) continue;
-				this.expanded.add(dir);
-				this.touch();
-			}
-		}
+		if (fold) this.refold();
 		if (this.activity.hasRunning() && !this.ticker) {
 			this.ticker = this.io.clock.every(TICK_MS, () => {
 				if (!this.activity.hasRunning()) {
@@ -407,10 +453,44 @@ export class TreeController {
 			this.expiry = this.io.clock.after(Math.max(1, next - now), () => {
 				this.expiry = null;
 				this.activity.expire(this.io.clock.now());
-				this.activityChanged();
+				// A hold that ends changes no folder: what it kept open stays
+				// open until new activity needs the room.
+				this.activityChanged(false);
 			});
 		}
 		this.host.changed();
+	}
+
+	/** Apply the fold rule: open the folders above the marked rows, and close
+	 * what it allows when the marked rows need the room. A close that is due
+	 * but paced runs when its interval ends. */
+	private refold(): void {
+		if (!this.root) return;
+		const now = this.io.clock.now();
+		const pinned = [...this.marks().keys()].filter((id) => id !== this.root);
+		const res = foldFor({
+			expanded: this.expanded,
+			pinned,
+			root: this.root,
+			room: this.room,
+			now,
+			lastCloseAt: this.lastCloseAt,
+			rowsOf: (expanded) => visibleRows(this.nodes, this.root, expanded, this.rootMore).map((r) => r.node.id),
+		});
+		if (res.closed.length > 0) this.lastCloseAt = now;
+		if (res.expanded.size !== this.expanded.size || [...res.expanded].some((d) => !this.expanded.has(d))) {
+			this.expanded = res.expanded;
+			this.touch();
+		}
+		this.closeRetry?.cancel();
+		this.closeRetry = null;
+		if (res.retryAt !== null) {
+			this.closeRetry = this.io.clock.after(Math.max(1, res.retryAt - now), () => {
+				this.closeRetry = null;
+				this.refold();
+				this.host.changed();
+			});
+		}
 	}
 
 	/** The live state of each marked row, by row id (the root's id for the
