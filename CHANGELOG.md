@@ -19,9 +19,10 @@ Notable changes to `pi-split-view`. Versioning is [SemVer](https://semver.org/).
   messages) then renders and takes mouse input. The default, `messages`, is unchanged.
 
 - File tree pane: a right column that shows the session's working directory with git
-  status colors and letters and `+N -N` line changes against HEAD. A row animates while
-  a tool call that names it runs, with the call's Tool Usage icon and color, then holds
-  a steady tone for 12 seconds (red when the call failed). Files a `bash` call changed
+  status colors and letters and `+N -N` line changes against HEAD. A row a tool
+  call touches gets a bar and a bold name in a saturated tone (purple for reads, orange
+  for writes, green for `bash` changes, red for a failed call). The name shimmers while
+  the call runs and for 3 seconds after, then holds its tone for 12 seconds. Files a `bash` call changed
   are marked when it ends. The folders above touched files open at once; other folders
   close only when the touched rows need the room, at most once every 2 seconds, and
   never above a running or held row. A click selects a file, and the next prompt tells

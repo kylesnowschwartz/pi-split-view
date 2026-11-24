@@ -4,6 +4,10 @@
  * however short the call was. A folder above such a row is not closed. */
 export const HOLD_MS = 12_000;
 
+/** How long a row's name shimmers after a call touches it. A call that runs
+ * longer shimmers until it ends. */
+export const SHIMMER_MS = 3_000;
+
 /** The least time between two automatic close passes of the fold rule. */
 export const CLOSE_INTERVAL_MS = 2_000;
 

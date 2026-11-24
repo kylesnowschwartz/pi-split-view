@@ -514,14 +514,18 @@ export class TreeController {
 		this.activityVersion += 1;
 		const now = this.io.clock.now();
 		if (fold) this.refold();
-		if (this.activity.hasRunning() && !this.ticker) {
+		if (this.activity.animating(now) && !this.ticker) {
 			this.ticker = this.io.clock.every(TICK_MS, () => {
-				if (!this.activity.hasRunning()) {
+				if (!this.activity.animating(this.io.clock.now())) {
 					this.ticker?.cancel();
 					this.ticker = null;
+					// The rows that shimmered now hold one shade.
+					this.activityVersion += 1;
+					this.host.changed();
 					return;
 				}
 				this.tick += 1;
+				this.activityVersion += 1;
 				this.host.changed();
 			});
 		}

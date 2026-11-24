@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MAX_DIR_ENTRIES, notedSelectionOf, SELECTION_NOTE_TYPE, TreeController } from "../filetree/controller.ts";
-import { CLOSE_INTERVAL_MS, HOLD_MS, TICK_MS } from "../filetree/timing.ts";
+import { CLOSE_INTERVAL_MS, HOLD_MS, SHIMMER_MS, TICK_MS } from "../filetree/timing.ts";
 import { fakeIo, settle, type World } from "./filetree-world.ts";
 
 const base = (): World => ({
@@ -209,7 +209,7 @@ test("a read runs on its row from start to end, opens the folders above it, then
 	assert.ok(ids(tree).includes("/r/src/deep/c.ts"), "the folders stay open after the hold");
 });
 
-test("the animation timer runs only while a row is running", async () => {
+test("the animation timer runs while a row is running and for the shimmer time after it ends", async () => {
 	const { io, tree } = await make(base());
 	const idle = io.pending();
 	tree.toolStart("c1", "read", { path: "a.ts" });
@@ -221,7 +221,12 @@ test("the animation timer runs only while a row is running", async () => {
 	tree.toolEnd("c1", false, "");
 	await settle();
 	io.advance(TICK_MS * 3);
-	assert.ok(tree.tick <= before + 4, "the timer stops within one tick of the end");
+	assert.equal(tree.tick, before + 6, "the row still shimmers just after the end");
+	io.advance(SHIMMER_MS);
+	const after = tree.tick;
+	io.advance(TICK_MS * 3);
+	assert.equal(tree.tick, after, "the timer stops when the shimmer time is over");
+	assert.equal(tree.marks().get("/r/a.ts")?.shimmer, false, "the row holds one shade");
 	// Only the hold timer is left; it goes when the hold ends.
 	assert.equal(io.pending(), idle + 1);
 	io.advance(HOLD_MS);

@@ -6,11 +6,11 @@
 
 import { inside, resolve } from "./paths.ts";
 import type { MarkKind, RowMark } from "./rows.ts";
-import { HOLD_MS } from "./timing.ts";
+import { HOLD_MS, SHIMMER_MS } from "./timing.ts";
 
 export type Call = { id: string; tool: string; kind: MarkKind; paths: string[]; seq: number };
 
-type Held = { kind: MarkKind; tool: string; error: boolean; until: number; seq: number };
+type Held = { kind: MarkKind; tool: string; error: boolean; since: number; until: number; seq: number };
 
 /** A marked path: its state and the order it was marked in (higher is newer). */
 export type PathMark = RowMark & { path: string; seq: number };
@@ -114,7 +114,7 @@ export class Activity {
 	/** Hold `paths` in a tone from now, with no call behind them. */
 	mark(paths: string[], kind: MarkKind, tool: string, now: number, error = false): void {
 		for (const path of paths)
-			this.held.set(path, { kind, tool, error, until: now + HOLD_MS, seq: ++this.seq });
+			this.held.set(path, { kind, tool, error, since: now, until: now + HOLD_MS, seq: ++this.seq });
 	}
 
 	/** Drop the holds that have run out. True when one did. */
@@ -150,6 +150,14 @@ export class Activity {
 		return false;
 	}
 
+	/** Whether a row's name moves at `now`: a running call names a path, or a
+	 * held path is inside its shimmer time. */
+	animating(now: number): boolean {
+		if (this.hasRunning()) return true;
+		for (const h of this.held.values()) if (h.until > now && now - h.since < SHIMMER_MS) return true;
+		return false;
+	}
+
 	/** Every marked path at `now`, oldest mark first. A path that a running
 	 * call names is running, whatever ended on it before; among running calls
 	 * on one path the newest gives the tool. */
@@ -157,13 +165,21 @@ export class Activity {
 		const out = new Map<string, PathMark>();
 		for (const [path, h] of this.held) {
 			if (h.until <= now) continue;
-			out.set(path, { path, state: "recent", kind: h.kind, tool: h.tool, error: h.error, seq: h.seq });
+			out.set(path, {
+				path,
+				state: "recent",
+				kind: h.kind,
+				tool: h.tool,
+				error: h.error,
+				shimmer: now - h.since < SHIMMER_MS,
+				seq: h.seq,
+			});
 		}
 		for (const c of this.calls.values()) {
 			for (const path of c.paths) {
 				const cur = out.get(path);
 				if (cur?.state === "running" && cur.seq > c.seq) continue;
-				out.set(path, { path, state: "running", kind: c.kind, tool: c.tool, error: false, seq: c.seq });
+				out.set(path, { path, state: "running", kind: c.kind, tool: c.tool, error: false, shimmer: true, seq: c.seq });
 			}
 		}
 		return [...out.values()].sort((a, b) => a.seq - b.seq);

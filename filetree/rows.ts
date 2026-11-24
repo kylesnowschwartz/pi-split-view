@@ -40,13 +40,47 @@ export type RowMark = {
 	tool: string;
 	/** The call failed. */
 	error: boolean;
+	/** The row's name moves: the call runs, or it ended a moment ago. */
+	shimmer: boolean;
 };
 
 /** A tool's badge: its 1-cell icon and the ANSI code of its color. */
 export type Badge = { icon: string; ansiColor: string };
 
-/** The tool whose badge color is the steady tone of each kind. */
-export const TONE_TOOL: Record<MarkKind, string> = { read: "read", write: "edit", bash: "bash" };
+/** The color family of a marked row. */
+export type Tone = "purple" | "orange" | "green" | "red";
+
+/** Four shades per tone, from the base color to the peak of the shimmer
+ * band. `bright` reads on a dark background, `dim` on a light one. */
+const TONES: Record<Tone, { bright: string[]; dim: string[] }> = {
+	purple: { bright: ["#a855f7", "#c084fc", "#d8b4fe", "#f3e8ff"], dim: ["#6b21a8", "#7e22ce", "#9333ea", "#c084fc"] },
+	orange: { bright: ["#f97316", "#fb923c", "#fdba74", "#ffedd5"], dim: ["#9a3412", "#c2410c", "#ea580c", "#fb923c"] },
+	green: { bright: ["#22c55e", "#4ade80", "#86efac", "#dcfce7"], dim: ["#166534", "#15803d", "#16a34a", "#4ade80"] },
+	red: { bright: ["#ef4444", "#f87171", "#fca5a5", "#fee2e2"], dim: ["#991b1b", "#b91c1c", "#dc2626", "#f87171"] },
+};
+
+/** Reads and searches are purple, writes orange, changes a bash command made
+ * green, and a failed call red. */
+export function toneOf(mark: Pick<RowMark, "kind" | "error">): Tone {
+	if (mark.error) return "red";
+	return mark.kind === "read" ? "purple" : mark.kind === "write" ? "orange" : "green";
+}
+
+/** The four shades of a tone for the theme's background. */
+export function shadesOf(tone: Tone, theme: PaneTheme): string[] {
+	return theme.appearance === "light" ? TONES[tone].dim : TONES[tone].bright;
+}
+
+/** The ANSI foreground code of a "#rrggbb" color. */
+function fgCode(hex: string): string {
+	const n = Number.parseInt(hex.slice(1), 16);
+	return `\x1b[38;2;${(n >> 16) & 255};${(n >> 8) & 255};${n & 255}m`;
+}
+
+/** `text` in one shade, with the foreground color ended after it. */
+export function inShade(hex: string, text: string): string {
+	return `${fgCode(hex)}${text}${RESET}`;
+}
 
 export interface RowContext {
 	theme: PaneTheme;
@@ -79,31 +113,37 @@ const GIT_ROLE: Record<GitLetter, PaneRole> = {
 	C: "accent",
 };
 
-/** Width of the bright band that travels over a running row's name. */
-const BAND = 3;
+/** Columns the band travels before the first character and after the last. */
+const BAND_LEAD = 4;
 
-/** `name` in the tool's color with a bright band at the frame's position. */
-export function shimmer(name: string, color: string, tick: number, theme: PaneTheme): string {
+/** The shade index of character `i` when the band's peak is at `peak`: the
+ * peak is the lightest shade, and each column away from it is one shade
+ * closer to the base. */
+export function shadeAt(i: number, peak: number): number {
+	const d = Math.abs(i - peak);
+	return d < 1 ? 3 : d < 2 ? 2 : d < 3 ? 1 : 0;
+}
+
+/** `name` in a tone's base shade with a lighter band at the frame's
+ * position. The band enters before the first character and leaves after the
+ * last. */
+export function shimmer(name: string, shades: string[], tick: number): string {
 	const chars = Array.from(name);
-	const period = chars.length + BAND + 4;
-	const head = ((tick % period) + period) % period;
+	const period = chars.length + 2 * BAND_LEAD;
+	const peak = (((tick * 1.5) % period) + period) % period - BAND_LEAD;
 	let out = "";
 	let run = "";
-	let runBright = false;
-	const flush = () => {
-		if (!run) return;
-		out += runBright ? theme.bold(theme.fg("text", run)) : `${color}${run}${RESET}`;
-		run = "";
-	};
+	let runShade = -1;
 	chars.forEach((ch, i) => {
-		const bright = i <= head && i > head - BAND;
-		if (bright !== runBright) {
-			flush();
-			runBright = bright;
+		const shade = shadeAt(i, peak);
+		if (shade !== runShade && run) {
+			out += inShade(shades[runShade] ?? "", run);
+			run = "";
 		}
+		runShade = shade;
 		run += ch;
 	});
-	flush();
+	if (run) out += inShade(shades[runShade] ?? "", run);
 	return out;
 }
 
@@ -132,13 +172,13 @@ export function renderRow(r: Row, ctx: RowContext): string {
 	if (loc && loc.removed > 0) right += th.fg("toolDiffRemoved", ` -${loc.removed}`);
 	right += shut && letter && gitRole ? ` ${th.bold(th.fg(gitRole, letter))}` : "  ";
 
+	// A marked row has a bar in its tone in the caret column (a cross when
+	// the call failed); a marked folder has its caret in the tone.
+	const shades = mark ? shadesOf(toneOf(mark), th) : undefined;
+	const solid = shades?.[1] ?? "";
 	const failed = mark?.state === "recent" && mark.error;
-	const caret =
-		n.kind === "dir"
-			? `${th.fg("muted", r.open ? "▾" : "▸")} `
-			: failed
-				? `${th.fg("error", "✗")} `
-				: "  ";
+	const caretGlyph = n.kind === "dir" ? (r.open ? "▾" : "▸") : failed ? "✗" : mark ? "▌" : " ";
+	const caret = `${mark ? th.bold(inShade(solid, caretGlyph)) : th.fg("muted", caretGlyph)} `;
 	const glyph = fileIcon(n, r.open, n.kind === "dir" && n.id === ctx.git.top);
 	const fixed = ctx.widthOf(indent) + 2 + 2;
 	const room = Math.max(1, ctx.width - fixed - ctx.widthOf(right));
@@ -146,22 +186,21 @@ export function renderRow(r: Row, ctx: RowContext): string {
 
 	let icon: string;
 	let label: string;
-	if (mark?.state === "running") {
-		const badge = ctx.badge(mark.tool);
-		icon = `${badge.ansiColor}${badge.icon}${RESET}`;
-		label = shimmer(name, badge.ansiColor, ctx.tick, th);
-	} else if (mark) {
-		const tone = mark.error ? undefined : ctx.badge(TONE_TOOL[mark.kind]).ansiColor;
-		const paint = (s: string) => (tone ? `${tone}${s}${RESET}` : th.fg("error", s));
-		icon = paint(glyph);
-		label = paint(name);
+	if (mark && shades) {
+		// A running row has its tool's icon; the name is bold in the tone and
+		// shimmers while the mark says so.
+		if (mark.state === "running") {
+			const badge = ctx.badge(mark.tool);
+			icon = `${badge.ansiColor}${badge.icon}${RESET}`;
+		} else icon = inShade(solid, glyph);
+		label = th.bold(mark.shimmer ? shimmer(name, shades, ctx.tick) : inShade(solid, name));
 	} else {
 		const quiet = isIgnored ? "dim" : n.hidden ? "muted" : undefined;
 		icon = th.fg(quiet ?? gitRole ?? (n.kind === "dir" ? "accent" : "muted"), glyph);
 		const role = quiet ?? gitRole ?? "text";
 		label = th.fg(role, name);
 	}
-	if (selected) label = th.bold(label);
+	if (selected && !mark) label = th.bold(label);
 
 	const left = `${indent}${caret}${icon} ${label}`;
 	const gap = " ".repeat(Math.max(0, ctx.width - ctx.widthOf(left) - ctx.widthOf(right)));

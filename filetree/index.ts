@@ -16,7 +16,7 @@ import { BRANCH_ICON } from "./icons.ts";
 import { nodeIo, type TreeIo } from "./io.ts";
 import { type PaneBody, type PaneModel, TreePane } from "./pane.ts";
 import { basename, relative } from "./paths.ts";
-import { type Badge, type PaneTheme, renderRow, type RowContext, shimmer, TONE_TOOL } from "./rows.ts";
+import { type Badge, type PaneTheme, inShade, renderRow, type RowContext, shadesOf, shimmer, toneOf } from "./rows.ts";
 import {
 	clampTreeWidth,
 	DEFAULT_TREE_WIDTH,
@@ -188,13 +188,11 @@ export class FileTree {
 		const name = basename(t.root) || "/";
 		const mark = t.marks().get(t.root);
 		let label = th.fg("muted", name);
-		if (mark?.state === "running") {
-			const badge = this.badge(mark.tool);
-			label = `${badge.ansiColor}${badge.icon}\x1b[39m ${shimmer(name, badge.ansiColor, t.tick, th)}`;
-		} else if (mark) {
-			label = mark.error
-				? th.fg("error", name)
-				: `${this.badge(TONE_TOOL[mark.kind]).ansiColor}${name}\x1b[39m`;
+		if (mark) {
+			const shades = shadesOf(toneOf(mark), th);
+			const badge = mark.state === "running" ? this.badge(mark.tool) : null;
+			const icon = badge ? `${badge.ansiColor}${badge.icon}\x1b[39m ` : "";
+			label = icon + th.bold(mark.shimmer ? shimmer(name, shades, t.tick) : inShade(shades[1] ?? "", name));
 		}
 		const branch = t.git.branch ? th.fg("dim", `  ${BRANCH_ICON} ${t.git.branch.head}`) : "";
 		return ` ${label}${branch}`;

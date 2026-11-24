@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Activity, RESULT_FILES_MAX, resultFiles, resultText, toolTargets } from "../filetree/activity.ts";
 import { changedBetween } from "../filetree/git.ts";
-import { HOLD_MS } from "../filetree/timing.ts";
+import { HOLD_MS, SHIMMER_MS } from "../filetree/timing.ts";
 
 const T0 = 50_000;
 const state = (a: Activity, now: number) =>
@@ -136,4 +136,16 @@ test("bash snapshot diff: a file differs when its signature changed, appeared or
 
 test("bash snapshot diff: an edit that keeps the line counts still differs by its stamp", () => {
 	assert.deepEqual(changedBetween({ "/r/a.ts": "mod:1:1:100:20" }, { "/r/a.ts": "mod:1:1:250:20" }), ["/r/a.ts"]);
+});
+
+test("a row shimmers while its call runs and for the shimmer time after it ends, then holds", () => {
+	const a = new Activity();
+	a.start("1", "read", "read", ["/r/a.ts"]);
+	assert.equal(a.marks(T0)[0]?.shimmer, true);
+	a.end("1", false, T0 + 60_000);
+	assert.equal(a.marks(T0 + 60_000 + SHIMMER_MS - 1)[0]?.shimmer, true);
+	assert.equal(a.animating(T0 + 60_000 + SHIMMER_MS - 1), true);
+	assert.equal(a.marks(T0 + 60_000 + SHIMMER_MS)[0]?.shimmer, false);
+	assert.equal(a.animating(T0 + 60_000 + SHIMMER_MS), false);
+	assert.equal(a.marks(T0 + 60_000 + SHIMMER_MS)[0]?.state, "recent");
 });

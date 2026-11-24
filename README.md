@@ -88,11 +88,11 @@ File tree row states:
 
 | Row | Meaning |
 | --- | --- |
-| tool icon, name with a moving bright band | a tool call that names the row is running; it lasts from the call's start to its end, with the icon and color of the call's Tool Usage card |
-| name in a steady blue | a `read`, `grep`, `find` or `ls` call touched the row in the last 12 seconds |
-| name in a steady peach | an `edit` or `write` call touched the row in the last 12 seconds |
-| name in a steady green | a `bash` call that ended in the last 12 seconds changed the file (its git status, line counts or modification time differ from before the call) |
-| `✗`, name in the error color | the call that touched the row in the last 12 seconds failed |
+| `▌` bar, bold name with a moving light band | a tool call touches the row: the band moves while the call runs and for 3 seconds after it ends; a running row also shows the icon of the call's Tool Usage card |
+| `▌` bar, bold purple name | a `read`, `grep`, `find` or `ls` call touched the row in the last 12 seconds |
+| `▌` bar, bold orange name | an `edit` or `write` call touched the row in the last 12 seconds |
+| `▌` bar, bold green name | a `bash` call that ended in the last 12 seconds changed the file (its git status, line counts or modification time differ from before the call) |
+| `✗`, bold red name | the call that touched the row in the last 12 seconds failed |
 | name in the warning, success, error or accent color; letter at the right | git status: modified (`M`, `T`), new (`A`, `?`), deleted or unmerged (`D`, `U`), renamed or copied (`R`, `C`) |
 | dim name | ignored by git |
 
